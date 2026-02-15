@@ -62,6 +62,7 @@ public class Config {
         public final ModConfigSpec.IntValue PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES;
         public final ModConfigSpec.BooleanValue ITEM_RESILIENCE_ENABLED;
         public final ModConfigSpec.BooleanValue VOID_RECOVERY_ENABLED;
+        public final ModConfigSpec.BooleanValue HAZARD_RECOVERY_ENABLED;
         public final ModConfigSpec.BooleanValue VOID_RECOVERY_DEBUG_ENABLED;
         public final ModConfigSpec.EnumValue<VoidRecoveryMode> VOID_RECOVERY_MODE;
         public final ModConfigSpec.IntValue VOID_RECOVERY_WINDOW_TICKS;
@@ -134,6 +135,7 @@ public class Config {
             PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES = builder.comment("Max entities processed per highlight scan / 每次高亮扫描最大处理实体数").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 4096);
             ITEM_RESILIENCE_ENABLED = builder.comment("Items are immune to fire/explosion / 掉落物防火防爆").define("itemResilience", true);
             VOID_RECOVERY_ENABLED = builder.comment("Recover void-dropped items to safe position / 启用虚空掉落物安全恢复").define("voidRecovery", true);
+            HAZARD_RECOVERY_ENABLED = builder.comment("Recover items from lava/fire to safe position / 启用岩浆/火焰掉落物安全恢复").define("hazardRecovery", true);
             VOID_RECOVERY_DEBUG_ENABLED = builder.comment("Enable detailed void recovery debug logs / 启用虚空恢复详细调试日志").define("voidRecoveryDebug", false);
             VOID_RECOVERY_MODE = builder.comment("Void recovery mode: DEATH_DROPS_ONLY or ALL_DROPS / 虚空恢复模式：仅死亡掉落或全部掉落").defineEnum("voidRecoveryMode", VoidRecoveryMode.DEATH_DROPS_ONLY);
             VOID_RECOVERY_WINDOW_TICKS = builder.comment("Window ticks for void recovery limiter / 虚空恢复限流窗口（tick）").defineInRange("voidRecoveryWindowTicks", 10, 1, 1200);

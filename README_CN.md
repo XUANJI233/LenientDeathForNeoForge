@@ -17,6 +17,7 @@
 - `/lenientdeath config set privateHighlightScanRadius 96`：设置私有高亮扫描半径（范围：`8..256`）。
 - `/lenientdeath config set privateHighlightMaxScannedEntities 256`：设置单次扫描最大处理掉落物数量（范围：`16..4096`）。
 - `/lenientdeath config set voidRecovery true`：开启/关闭虚空恢复（布尔值：`true|false`）。
+- `/lenientdeath config set hazardRecovery true`：开启/关闭火焰/岩浆掉落物安全恢复（布尔值：`true|false`，默认开启）。
 - `/lenientdeath config set voidRecoveryDebug true`：开启/关闭虚空恢复调试日志（布尔值：`true|false`，默认关闭）。
 - `/lenientdeath config set voidRecoveryMode DEATH_DROPS_ONLY`：设置虚空恢复范围（`DEATH_DROPS_ONLY|ALL_DROPS`，默认 `DEATH_DROPS_ONLY`）。
 - `/lenientdeath config set voidRecoveryWindowTicks 10`：设置虚空恢复统计窗口（范围：`1..1200`）。
@@ -78,6 +79,8 @@ privateHighlightMaxScannedEntities = 256
 itemResilience = true
 # 启用虚空恢复（将掉落物挪到安全位置）
 voidRecovery = true
+# 启用火焰/岩浆掉落物安全恢复（将着火或在岩浆中的掉落物挪到安全位置）
+hazardRecovery = true
 # 启用虚空恢复调试日志（开发排查用，默认关闭）
 voidRecoveryDebug = false
 # 虚空恢复范围：仅死亡掉落（默认）或全部掉落
@@ -113,8 +116,9 @@ alwaysDroppedTags = ["minecraft:planks"]
 - 支持按标签强制掉落：`alwaysDroppedTags`。
 - `itemGlow` 控制是否启用“仅归属玩家可见”的私有高亮。
 - `voidRecovery` 控制是否启用掉落物虚空安全位置恢复。
+- `hazardRecovery` 控制是否启用火焰/岩浆掉落物安全位置恢复（物品着火或在岩浆中时传送到安全位置）。
 - `voidRecoveryMode` 支持 `DEATH_DROPS_ONLY`（默认，仅死亡掉落恢复）和 `ALL_DROPS`（全部掉落都恢复）。
-- 虚空恢复时会优先落到可站立表面；若附近无有效地面，会回退到世界出生点附近安全位置。
+- 虚空/火焰恢复时会优先搜索物品上方最近的可站立平台；若附近无有效地面，会回退到玩家历史安全点或世界出生点。
 
 ## 开发命令
 

@@ -249,34 +249,28 @@ public class DeathEventHandler {
     }
 
     /**
-     * 4. 虚空救援 (高性能版)
+     * 4. 危险抢救（虚空 + 火焰/岩浆）
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
     public static void onEntityTick(EntityTickEvent.Pre event) {
-        if (!Config.COMMON.VOID_RECOVERY_ENABLED.get()) return;
         if (!(event.getEntity() instanceof ItemEntity item)) return;
         if (item.level().isClientSide) return;
 
-        Config.VoidRecoveryMode recoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
-        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY
-                && (!ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
-                || !ModEntityData.get(item, ModAttachments.IS_DEATH_DROP))) {
-            if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
-                        item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
-            }
-            return;
-        }
+        boolean voidRecoveryEnabled = Config.COMMON.VOID_RECOVERY_ENABLED.get();
+        boolean hazardRecoveryEnabled = Config.COMMON.HAZARD_RECOVERY_ENABLED.get();
+        
+        if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
 
-        var lvl = item.level();
-        double triggerY = lvl.getMinBuildHeight() - 16.0;
-        double currentY = item.getY();
-        double predictedNextY = currentY + item.getDeltaMovement().y;
-        if (currentY > triggerY && predictedNextY > triggerY) {
+        Config.VoidRecoveryMode recoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
+        boolean isDeathDrop = ModEntityData.has(item, ModAttachments.IS_DEATH_DROP) 
+                && ModEntityData.get(item, ModAttachments.IS_DEATH_DROP);
+        
+        // 根据模式过滤非死亡掉落物
+        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY && !isDeathDrop) {
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} reason=above_trigger triggerY={} currentY={} nextY={}",
-                        item.getId(), triggerY, currentY, predictedNextY);
+                LOGGER.info("[LenientDeath][Recovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
+                        item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
             }
             return;
         }
@@ -286,10 +280,39 @@ public class DeathEventHandler {
             return;
         }
 
-        // 当前帧或下一帧将越过阈值时就触发，避免高速下坠跨帧漏判
+        var lvl = item.level();
+        String recoveryReason = null;
+        
+        // 检查虚空
+        if (voidRecoveryEnabled) {
+            double triggerY = lvl.getMinBuildHeight() - 16.0;
+            double currentY = item.getY();
+            double predictedNextY = currentY + item.getDeltaMovement().y;
+            if (currentY <= triggerY || predictedNextY <= triggerY) {
+                recoveryReason = "void";
+            }
+        }
+        
+        // 检查火焰/岩浆（仅当未触发虚空恢复时）
+        if (recoveryReason == null && hazardRecoveryEnabled) {
+            if (item.isOnFire() || item.isInLava()) {
+                recoveryReason = item.isInLava() ? "lava" : "fire";
+            }
+        }
+        
+        if (recoveryReason == null) {
+            if (isVoidRecoveryDebugEnabled() && voidRecoveryEnabled) {
+                double triggerY = lvl.getMinBuildHeight() - 16.0;
+                LOGGER.info("[LenientDeath][Recovery] Skip item {} reason=safe triggerY={} currentY={}",
+                        item.getId(), triggerY, item.getY());
+            }
+            return;
+        }
+
+        // 限流检查
         if (!canRecoverFromVoidNow(item)) {
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} reason=limiter_blocked at ({}, {}, {})",
+                LOGGER.info("[LenientDeath][Recovery] Skip item {} reason=limiter_blocked at ({}, {}, {})",
                         item.getId(), item.getX(), item.getY(), item.getZ());
             }
             return;
@@ -303,13 +326,18 @@ public class DeathEventHandler {
 
             RecoveryTarget recoveryTarget = resolveRecoveryTarget(serverLevel, item);
             teleportItemToSafety(item, recoveryTarget.pos());
+            
+            // 火焰/岩浆恢复后熟火
+            if ("lava".equals(recoveryReason) || "fire".equals(recoveryReason)) {
+                item.clearFire();
+            }
 
             // 标记已恢复，避免重复处理
             ModEntityData.put(item, ModAttachments.VOID_RECOVERED, true);
 
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][VoidRecovery] Recover item {} mode={} source={} from ({}, {}, {}) -> ({}, {}, {})",
-                        item.getId(), recoveryMode, recoveryTarget.source(),
+                LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
+                        item.getId(), recoveryMode, recoveryReason, recoveryTarget.source(),
                         fromX, fromY, fromZ,
                         recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY() + 1.0, recoveryTarget.pos().getZ() + 0.5);
             }
@@ -433,16 +461,8 @@ public class DeathEventHandler {
     }
 
     private static BlockPos resolveStandingSafePos(ServerLevel level, BlockPos playerPos) {
-        BlockPos below = playerPos.below();
-        if (!level.getBlockState(below).isAir()) {
-            return playerPos;
-        }
-
-        int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, playerPos.getX(), playerPos.getZ());
-        if (topY > level.getMinBuildHeight()) {
-            return new BlockPos(playerPos.getX(), topY, playerPos.getZ());
-        }
-
+        // 玩家已经 onGround()，直接使用当前位置作为安全点
+        // 不使用 Heightmap，避免返回世界最高表面而忽略中间平台
         return playerPos;
     }
 

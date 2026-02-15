@@ -28,6 +28,8 @@ You can modify key config values at runtime (OP level 2+):
 - `/lenientdeath config set privateHighlightScanRadius 96`
 - `/lenientdeath config set privateHighlightMaxScannedEntities 256`
 - `/lenientdeath config set voidRecovery true`
+- `/lenientdeath config set hazardRecovery true` (fire/lava recovery)
+- `/lenientdeath config set voidRecoveryDebug true` (debug logging)
 - `/lenientdeath config set voidRecoveryMode DEATH_DROPS_ONLY`
 - `/lenientdeath config set voidRecoveryWindowTicks 10`
 - `/lenientdeath config set voidRecoveryMaxRecoveries 3`
@@ -72,6 +74,10 @@ privateHighlightMaxScannedEntities = 256
 itemResilience = true
 # Recover dropped items from void into safe positions
 voidRecovery = true
+# Recover items from fire/lava to safe positions
+hazardRecovery = true
+# Enable detailed recovery debug logs (default off)
+voidRecoveryDebug = false
 # Void recovery scope: DEATH_DROPS_ONLY (default) or ALL_DROPS
 voidRecoveryMode = "DEATH_DROPS_ONLY"
 # Try to restore preserved items back to their original inventory slots
@@ -104,7 +110,8 @@ alwaysDroppedTags = ["minecraft:planks"]
 - Void recovery mode supports `DEATH_DROPS_ONLY` (default) and `ALL_DROPS`.
 - `itemGlow` controls private owner-only highlight.
 - `voidRecovery` controls safe-position recovery for dropped items in void.
-- Recovered items are relocated onto a valid surface (safe fallback to world spawn area if needed).
+- `hazardRecovery` controls safe-position recovery for items on fire or in lava.
+- Recovered items teleport to the nearest solid surface above; falls back to player history or spawn.
 
 ## Development
 

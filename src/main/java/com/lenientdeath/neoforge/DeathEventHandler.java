@@ -47,6 +47,7 @@ import org.slf4j.LoggerFactory;
 public class DeathEventHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/DeathEventHandler");
     private record SavedItem(ItemStack stack, int originalSlot) {}
+    private record RecoveryTarget(BlockPos pos, String source) {}
 
     private static final int SAFE_POS_UPDATE_TICKS = 10;
     private static final int SAFE_POS_HISTORY_LIMIT = 12;
@@ -261,6 +262,10 @@ public class DeathEventHandler {
         if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY
                 && (!ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
                 || !ModEntityData.get(item, ModAttachments.IS_DEATH_DROP))) {
+            if (isVoidRecoveryDebugEnabled()) {
+                LOGGER.debug("[VoidRecovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
+                        item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
+            }
             return;
         }
 
@@ -268,23 +273,39 @@ public class DeathEventHandler {
         double triggerY = lvl.getMinBuildHeight() - 16.0;
         double currentY = item.getY();
         double predictedNextY = currentY + item.getDeltaMovement().y;
-        if (currentY > triggerY && predictedNextY > triggerY) return;
+        if (currentY > triggerY && predictedNextY > triggerY) {
+            if (isVoidRecoveryDebugEnabled()) {
+                LOGGER.debug("[VoidRecovery] Skip item {} reason=above_trigger triggerY={} currentY={} nextY={}",
+                        item.getId(), triggerY, currentY, predictedNextY);
+            }
+            return;
+        }
 
         // 当前帧或下一帧将越过阈值时就触发，避免高速下坠跨帧漏判
         if (!canRecoverFromVoidNow(item)) {
+            if (isVoidRecoveryDebugEnabled()) {
+                LOGGER.debug("[VoidRecovery] Skip item {} reason=limiter_blocked at ({}, {}, {})",
+                        item.getId(), item.getX(), item.getY(), item.getZ());
+            }
             return;
         }
 
         if (lvl instanceof ServerLevel serverLevel) {
-            BlockPos recoveryPos = resolveRecoveryTarget(serverLevel, item);
-            teleportItemToSafety(item, recoveryPos);
+            RecoveryTarget recoveryTarget = resolveRecoveryTarget(serverLevel, item);
+            teleportItemToSafety(item, recoveryTarget.pos());
+            if (isVoidRecoveryDebugEnabled()) {
+                LOGGER.debug("[VoidRecovery] Recover item {} mode={} source={} from ({}, {}, {}) -> ({}, {}, {})",
+                        item.getId(), recoveryMode, recoveryTarget.source(),
+                        item.getX(), item.getY(), item.getZ(),
+                        recoveryTarget.pos().getX(), recoveryTarget.pos().getY(), recoveryTarget.pos().getZ());
+            }
         }
     }
 
-    private static BlockPos resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
+    private static RecoveryTarget resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
         BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition());
         if (fromCurrentColumn != null) {
-            return fromCurrentColumn;
+            return new RecoveryTarget(fromCurrentColumn, "nearby_surface");
         }
 
         GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
@@ -294,7 +315,7 @@ public class DeathEventHandler {
         if (safePos != null && safePos.dimension() == level.dimension()) {
             BlockPos fromSafe = findSurfaceTarget(level, safePos.pos());
             if (fromSafe != null) {
-                return fromSafe;
+                return new RecoveryTarget(fromSafe, "item_safe_pos");
             }
         }
 
@@ -304,7 +325,7 @@ public class DeathEventHandler {
             if (historical != null) {
                 BlockPos fromHistory = findSurfaceTarget(level, historical.pos());
                 if (fromHistory != null) {
-                    return fromHistory;
+                    return new RecoveryTarget(fromHistory, "owner_history");
                 }
             }
         }
@@ -312,11 +333,11 @@ public class DeathEventHandler {
         BlockPos spawnPos = level.getSharedSpawnPos();
         BlockPos fromSpawn = findSurfaceTarget(level, spawnPos);
         if (fromSpawn != null) {
-            return fromSpawn;
+            return new RecoveryTarget(fromSpawn, "spawn_surface");
         }
 
         int fallbackY = Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel());
-        return new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ());
+        return new RecoveryTarget(new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ()), "spawn_fallback");
     }
 
     private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {
@@ -607,6 +628,10 @@ public class DeathEventHandler {
 
     private static int getPrivateHighlightMaxScannedEntities() {
         return Math.max(16, Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES.get());
+    }
+
+    private static boolean isVoidRecoveryDebugEnabled() {
+        return Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED.get();
     }
 
     public static boolean isSharedFlagsAccessorReady() {

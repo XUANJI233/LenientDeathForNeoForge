@@ -35,6 +35,7 @@ public final class ConfigCommands {
                 .then(booleanSetting("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
                 .then(booleanSetting("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanSetting("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(booleanSetting("voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED))
                 .then(enumSetting("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanSetting("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intSetting("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
@@ -51,6 +52,7 @@ public final class ConfigCommands {
                 .then(booleanGetter("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
                 .then(booleanGetter("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanGetter("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(booleanGetter("voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED))
                 .then(enumGetter("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanGetter("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intGetter("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
@@ -263,6 +265,7 @@ public final class ConfigCommands {
             applyInt(fileConfig, "Features.privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES);
             applyBoolean(fileConfig, "Features.itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED);
             applyBoolean(fileConfig, "Features.voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED);
+            applyBoolean(fileConfig, "Features.voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED);
             applyEnum(fileConfig, "Features.voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE);
             applyInt(fileConfig, "Features.voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS);
             applyInt(fileConfig, "Features.voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES);

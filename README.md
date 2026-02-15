@@ -1,4 +1,4 @@
-# LenientDeath (NeoForge 1.21.1)
+# LenientDeath (NeoForge 1.21.x, 1.21-1.21.11)
 
 [中文文档 / README_CN](README_CN.md)
 

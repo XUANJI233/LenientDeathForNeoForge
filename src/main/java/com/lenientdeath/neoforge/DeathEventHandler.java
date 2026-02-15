@@ -265,10 +265,12 @@ public class DeathEventHandler {
         }
 
         var lvl = item.level();
-        double triggerY = lvl.getMinBuildHeight() + 2.0;
-        if (item.getY() > triggerY) return;
+        double triggerY = lvl.getMinBuildHeight() - 16.0;
+        double currentY = item.getY();
+        double predictedNextY = currentY + item.getDeltaMovement().y;
+        if (currentY > triggerY && predictedNextY > triggerY) return;
 
-        // 提前在最低高度附近触发，避免被虚空清理逻辑先移除
+        // 当前帧或下一帧将越过阈值时就触发，避免高速下坠跨帧漏判
         if (!canRecoverFromVoidNow(item)) {
             return;
         }

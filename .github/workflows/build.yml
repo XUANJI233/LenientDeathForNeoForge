@@ -80,7 +80,7 @@ jobs:
       - name: Publish to Modrinth
         uses: Kir-Antipov/mc-publish@v3.3
         with:
-          modrinth-id: LenientDeathForNeoForge
+          modrinth-id: lenientdeathforneoforge
           modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
           files: ${{ steps.jar.outputs.jar_path }}
           name: LenientDeath For NeoForge ${{ github.ref_name }}
@@ -88,7 +88,6 @@ jobs:
           version-type: release
           loaders: neoforge
           game-versions: |
-            1.21
             1.21.1
             1.21.2
             1.21.3

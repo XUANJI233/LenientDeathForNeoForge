@@ -268,7 +268,7 @@ public class DeathEventHandler {
         double triggerY = lvl.getMinBuildHeight() + 2.0;
         if (item.getY() > triggerY) return;
 
-        // 进入世界底部附近就触发，避免物品被虚空先清理导致无法恢复。
+        // 提前在最低高度附近触发，避免被虚空清理逻辑先移除
         if (!canRecoverFromVoidNow(item)) {
             return;
         }

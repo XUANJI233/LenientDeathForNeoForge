@@ -39,25 +39,58 @@
 
 - `/lenientdeath config reload`：从 `lenientdeath-common.toml` 重新加载配置并立即应用（用于手动改文件后生效）。
 - `/lenientdeath config get <key>`：查看当前配置值（数值类会同时显示允许范围）。
+- `/lenientdeath config preserve item add <物品ID>`：添加“总是保留”物品ID（示例：`minecraft:totem_of_undying`）。
+- `/lenientdeath config preserve item remove <物品ID>`：删除“总是保留”物品ID。
+- `/lenientdeath config preserve item list`：查看当前“总是保留”物品ID列表。
+- `/lenientdeath config preserve tag add <标签ID>`：添加“总是保留”标签（示例：`minecraft:logs`）。
+- `/lenientdeath config preserve tag remove <标签ID>`：删除“总是保留”标签。
+- `/lenientdeath config preserve tag list`：查看当前“总是保留”标签列表。
+- `/lenientdeath config drop item add <物品ID>`：添加“总是掉落”物品ID。
+- `/lenientdeath config drop item remove <物品ID>`：删除“总是掉落”物品ID。
+- `/lenientdeath config drop item list`：查看当前“总是掉落”物品ID列表。
+- `/lenientdeath config drop tag add <标签ID>`：添加“总是掉落”标签。
+- `/lenientdeath config drop tag remove <标签ID>`：删除“总是掉落”标签。
+- `/lenientdeath config drop tag list`：查看当前“总是掉落”标签列表。
 - `/lenientdeath debug status`：输出调试状态（高亮跟踪数量、缓存数量、关键反射状态）用于排查问题。
 
 ## 配置示例
 
 ```toml
 [Features]
+# 玩家重生/克隆后在聊天栏显示死亡坐标
 deathCoordinates = true
+# 启用“仅归属玩家可见”的私有高亮
 itemGlow = true
+# 私有高亮扫描间隔（tick，范围 1..200）
 privateHighlightScanIntervalTicks = 10
+# 私有高亮扫描半径（方块，范围 8..256）
 privateHighlightScanRadius = 96.0
+# 单次扫描最多处理的掉落实体数量（范围 16..4096）
 privateHighlightMaxScannedEntities = 256
+# 提高掉落物生存韧性，减少意外销毁
 itemResilience = true
+# 启用虚空恢复（将掉落物挪到安全位置）
 voidRecovery = true
+# 尝试把保留物品放回死亡前的原槽位
 restoreSlots = true
 
 # --- 虚空恢复限流 ---
+# 恢复次数统计窗口（tick，范围 1..1200）
 voidRecoveryWindowTicks = 10
+# 一个窗口内最多恢复次数（范围 1..100）
 voidRecoveryMaxRecoveries = 3
+# 达到上限后的冷却时长（tick，范围 1..1200）
 voidRecoveryCooldownTicks = 10
+
+[Lists]
+# 这些物品ID始终保留
+alwaysPreservedItems = ["minecraft:totem_of_undying"]
+# 匹配这些标签的物品始终保留
+alwaysPreservedTags = ["minecraft:logs"]
+# 这些物品ID始终掉落
+alwaysDroppedItems = ["minecraft:diamond"]
+# 匹配这些标签的物品始终掉落
+alwaysDroppedTags = ["minecraft:planks"]
 ```
 
 ## 规则说明
@@ -65,6 +98,8 @@ voidRecoveryCooldownTicks = 10
 - 支持按物品类型保留：护甲、工具、武器、食物、药水、Curios。
 - 支持按具体物品 ID 保留：`alwaysPreservedItems`。
 - 支持按标签保留：`alwaysPreservedTags`。
+- 支持按具体物品 ID 强制掉落：`alwaysDroppedItems`。
+- 支持按标签强制掉落：`alwaysDroppedTags`。
 - `itemGlow` 控制是否启用“仅归属玩家可见”的私有高亮。
 - `voidRecovery` 控制是否启用掉落物虚空安全位置恢复。
 

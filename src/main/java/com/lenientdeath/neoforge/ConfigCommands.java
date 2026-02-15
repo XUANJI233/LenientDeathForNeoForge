@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -16,6 +17,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 @SuppressWarnings("null")
@@ -56,12 +58,126 @@ public final class ConfigCommands {
                 .then(intGetter("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
                 .then(intGetter("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
 
+            LiteralArgumentBuilder<CommandSourceStack> preserve = Commands.literal("preserve")
+                .then(Commands.literal("item")
+                    .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> addStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_PRESERVED_ITEMS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.preserve.item.added",
+                                "lenientdeath.command.config.preserve.item.exists"
+                            ))))
+                    .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> removeStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_PRESERVED_ITEMS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.preserve.item.removed",
+                                "lenientdeath.command.config.preserve.item.missing"
+                            ))))
+                    .then(Commands.literal("list")
+                        .executes(context -> listStringEntries(
+                            context.getSource(),
+                            Config.COMMON.ALWAYS_PRESERVED_ITEMS,
+                            "lenientdeath.command.config.preserve.item.list.header",
+                            "lenientdeath.command.config.preserve.list.empty"
+                        )))
+                )
+                .then(Commands.literal("tag")
+                    .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> addStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_PRESERVED_TAGS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.preserve.tag.added",
+                                "lenientdeath.command.config.preserve.tag.exists"
+                            ))))
+                    .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> removeStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_PRESERVED_TAGS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.preserve.tag.removed",
+                                "lenientdeath.command.config.preserve.tag.missing"
+                            ))))
+                    .then(Commands.literal("list")
+                        .executes(context -> listStringEntries(
+                            context.getSource(),
+                            Config.COMMON.ALWAYS_PRESERVED_TAGS,
+                            "lenientdeath.command.config.preserve.tag.list.header",
+                            "lenientdeath.command.config.preserve.list.empty"
+                        )))
+                );
+
+            LiteralArgumentBuilder<CommandSourceStack> drop = Commands.literal("drop")
+                .then(Commands.literal("item")
+                    .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> addStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_DROPPED_ITEMS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.drop.item.added",
+                                "lenientdeath.command.config.drop.item.exists"
+                            ))))
+                    .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> removeStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_DROPPED_ITEMS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.drop.item.removed",
+                                "lenientdeath.command.config.drop.item.missing"
+                            ))))
+                    .then(Commands.literal("list")
+                        .executes(context -> listStringEntries(
+                            context.getSource(),
+                            Config.COMMON.ALWAYS_DROPPED_ITEMS,
+                            "lenientdeath.command.config.drop.item.list.header",
+                            "lenientdeath.command.config.drop.list.empty"
+                        )))
+                )
+                .then(Commands.literal("tag")
+                    .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> addStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_DROPPED_TAGS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.drop.tag.added",
+                                "lenientdeath.command.config.drop.tag.exists"
+                            ))))
+                    .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                            .executes(context -> removeStringListEntry(
+                                context.getSource(),
+                                Config.COMMON.ALWAYS_DROPPED_TAGS,
+                                StringArgumentType.getString(context, "id"),
+                                "lenientdeath.command.config.drop.tag.removed",
+                                "lenientdeath.command.config.drop.tag.missing"
+                            ))))
+                    .then(Commands.literal("list")
+                        .executes(context -> listStringEntries(
+                            context.getSource(),
+                            Config.COMMON.ALWAYS_DROPPED_TAGS,
+                            "lenientdeath.command.config.drop.tag.list.header",
+                            "lenientdeath.command.config.drop.list.empty"
+                        )))
+                );
+
         event.getDispatcher().register(
                 Commands.literal("lenientdeath")
                         .requires(source -> source.hasPermission(2))
                         .then(Commands.literal("config")
                                 .then(set)
                                 .then(get)
+                        .then(preserve)
+                            .then(drop)
                                 .then(Commands.literal("reload")
                                         .executes(context -> reloadFromFile(context.getSource()))))
                         .then(Commands.literal("debug")
@@ -287,5 +403,66 @@ public final class ConfigCommands {
                     context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value_range", key, String.valueOf(value.get()), String.valueOf(min), String.valueOf(max)), false);
                     return 1;
                 });
+    }
+
+    private static int addStringListEntry(CommandSourceStack source,
+                                          ModConfigSpec.ConfigValue<List<? extends String>> target,
+                                          String entry,
+                                          String successKey,
+                                          String existsKey) {
+        List<String> values = new ArrayList<>(target.get());
+        if (values.contains(entry)) {
+            source.sendFailure(Component.translatable(existsKey, entry));
+            return 0;
+        }
+
+        values.add(entry);
+        target.set(values);
+        ManualAllowAndBlocklist.INSTANCE.refreshItems();
+
+        int saved = saveConfig(source);
+        if (saved == 1) {
+            source.sendSuccess(() -> Component.translatable(successKey, entry), true);
+        }
+        return saved;
+    }
+
+    private static int removeStringListEntry(CommandSourceStack source,
+                                             ModConfigSpec.ConfigValue<List<? extends String>> target,
+                                             String entry,
+                                             String successKey,
+                                             String missingKey) {
+        List<String> values = new ArrayList<>(target.get());
+        if (!values.remove(entry)) {
+            source.sendFailure(Component.translatable(missingKey, entry));
+            return 0;
+        }
+
+        target.set(values);
+        ManualAllowAndBlocklist.INSTANCE.refreshItems();
+
+        int saved = saveConfig(source);
+        if (saved == 1) {
+            source.sendSuccess(() -> Component.translatable(successKey, entry), true);
+        }
+        return saved;
+    }
+
+    private static int listStringEntries(CommandSourceStack source,
+                                         ModConfigSpec.ConfigValue<List<? extends String>> target,
+                                         String headerKey,
+                                         String emptyKey) {
+        List<? extends String> values = target.get();
+        source.sendSuccess(() -> Component.translatable(headerKey, values.size()), false);
+
+        if (values.isEmpty()) {
+            source.sendSuccess(() -> Component.translatable(emptyKey), false);
+            return 1;
+        }
+
+        for (String value : values) {
+            source.sendSuccess(() -> Component.literal("- " + value), false);
+        }
+        return values.size();
     }
 }

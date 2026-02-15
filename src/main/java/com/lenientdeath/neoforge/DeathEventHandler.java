@@ -265,10 +265,10 @@ public class DeathEventHandler {
         }
 
         var lvl = item.level();
-        double triggerY = lvl.getMinBuildHeight() - 16.0;
-        if (item.getY() >= triggerY) return;
+        double triggerY = lvl.getMinBuildHeight() + 2.0;
+        if (item.getY() > triggerY) return;
 
-        // 只有当掉落到世界最低高度以下 16 格时才触发
+        // 进入世界底部附近就触发，避免物品被虚空先清理导致无法恢复。
         if (!canRecoverFromVoidNow(item)) {
             return;
         }

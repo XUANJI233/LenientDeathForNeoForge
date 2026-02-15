@@ -27,7 +27,9 @@ import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 import net.neoforged.neoforge.common.util.TriState;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -47,6 +49,7 @@ public class DeathEventHandler {
     private record SavedItem(ItemStack stack, int originalSlot) {}
 
     private static final int SAFE_POS_UPDATE_TICKS = 10;
+    private static final int SAFE_POS_HISTORY_LIMIT = 12;
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     private static final byte GLOWING_FLAG_MASK = 0x40;
 
@@ -55,7 +58,7 @@ public class DeathEventHandler {
 
     private static final Map<UUID, List<SavedItem>> SAVED_ITEMS = new ConcurrentHashMap<>();
     private static final Map<UUID, Map<Integer, ItemStack>> INVENTORY_SNAPSHOTS = new ConcurrentHashMap<>();
-    private static final Map<UUID, BlockPos> LAST_SAFE_BLOCK_POS = new ConcurrentHashMap<>();
+    private static final Map<UUID, Deque<GlobalPos>> SAFE_POS_HISTORY = new ConcurrentHashMap<>();
     private static final Map<UUID, GlobalPos> PENDING_DEATH_POS = new ConcurrentHashMap<>();
     private static final Map<UUID, Set<Integer>> PRIVATE_HIGHLIGHTED_ENTITY_IDS = new ConcurrentHashMap<>();
 
@@ -91,17 +94,13 @@ public class DeathEventHandler {
             clearPrivateHighlights(player);
         }
 
-        // 只有玩家站在地面上，且不是观察者模式时，才记录位置
-        if (player.tickCount % SAFE_POS_UPDATE_TICKS == 0 && player.onGround() && !player.isSpectator()) {
+        // 只有玩家站在地面上，且不是观察者模式时，才记录安全点历史
+        if (player.tickCount % SAFE_POS_UPDATE_TICKS == 0 && player.onGround() && !player.isSpectator() && player.level() instanceof ServerLevel serverLevel) {
             BlockPos currentBlockPos = player.blockPosition();
-            BlockPos previous = LAST_SAFE_BLOCK_POS.get(player.getUUID());
-            if (currentBlockPos.equals(previous)) return;
-
-            var lvl = player.level();
-            GlobalPos currentPos = GlobalPos.of(lvl.dimension(), currentBlockPos);
-            // 存入玩家的数据附件中
+            BlockPos safePos = resolveStandingSafePos(serverLevel, currentBlockPos);
+            GlobalPos currentPos = GlobalPos.of(serverLevel.dimension(), safePos.immutable());
+            pushSafePosHistory(player.getUUID(), currentPos);
             ModEntityData.put(player, ModAttachments.SAFE_RECOVERY_POS, currentPos);
-            LAST_SAFE_BLOCK_POS.put(player.getUUID(), currentBlockPos.immutable());
         }
 
         // No periodic scanning here — pickup is handled via ItemEntityPickupEvent for performance.
@@ -182,10 +181,11 @@ public class DeathEventHandler {
 
         // 获取快照
         Map<Integer, ItemStack> snapshot = INVENTORY_SNAPSHOTS.remove(player.getUUID());
-        // 获取玩家重生前最后记录的安全位置
-        GlobalPos lastSafePos = ModEntityData.has(player, ModAttachments.SAFE_RECOVERY_POS)
-            ? ModEntityData.get(player, ModAttachments.SAFE_RECOVERY_POS)
-            : null;
+        // 获取玩家历史安全点中的最佳候选（优先同维度且接近死亡点）
+        GlobalPos lastSafePos = getBestHistoricalSafePos(player.getUUID(), player.level().dimension(), player.blockPosition());
+        if (lastSafePos == null && ModEntityData.has(player, ModAttachments.SAFE_RECOVERY_POS)) {
+            lastSafePos = ModEntityData.get(player, ModAttachments.SAFE_RECOVERY_POS);
+        }
 
         while (iterator.hasNext()) {
             ItemEntity entity = iterator.next();
@@ -282,7 +282,7 @@ public class DeathEventHandler {
     }
 
     private static BlockPos resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
-        BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition(), 32);
+        BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition());
         if (fromCurrentColumn != null) {
             return fromCurrentColumn;
         }
@@ -292,14 +292,25 @@ public class DeathEventHandler {
                 : null;
 
         if (safePos != null && safePos.dimension() == level.dimension()) {
-            BlockPos fromSafe = findSurfaceTarget(level, safePos.pos(), 24);
+            BlockPos fromSafe = findSurfaceTarget(level, safePos.pos());
             if (fromSafe != null) {
                 return fromSafe;
             }
         }
 
+        if (ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+            UUID ownerId = ModEntityData.get(item, ModAttachments.OWNER_UUID);
+            GlobalPos historical = getBestHistoricalSafePos(ownerId, level.dimension(), item.blockPosition());
+            if (historical != null) {
+                BlockPos fromHistory = findSurfaceTarget(level, historical.pos());
+                if (fromHistory != null) {
+                    return fromHistory;
+                }
+            }
+        }
+
         BlockPos spawnPos = level.getSharedSpawnPos();
-        BlockPos fromSpawn = findSurfaceTarget(level, spawnPos, 16);
+        BlockPos fromSpawn = findSurfaceTarget(level, spawnPos);
         if (fromSpawn != null) {
             return fromSpawn;
         }
@@ -308,8 +319,8 @@ public class DeathEventHandler {
         return new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ());
     }
 
-    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center, int maxRadius) {
-        for (int radius = 0; radius <= maxRadius; radius++) {
+    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {
+        for (int radius = 0; radius <= 16; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     if (radius > 0 && Math.abs(dx) != radius && Math.abs(dz) != radius) {
@@ -331,6 +342,55 @@ public class DeathEventHandler {
             }
         }
         return null;
+    }
+
+    private static BlockPos resolveStandingSafePos(ServerLevel level, BlockPos playerPos) {
+        BlockPos below = playerPos.below();
+        if (!level.getBlockState(below).isAir()) {
+            return playerPos;
+        }
+
+        int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, playerPos.getX(), playerPos.getZ());
+        if (topY > level.getMinBuildHeight()) {
+            return new BlockPos(playerPos.getX(), topY, playerPos.getZ());
+        }
+
+        return playerPos;
+    }
+
+    private static void pushSafePosHistory(UUID playerId, GlobalPos pos) {
+        Deque<GlobalPos> history = SAFE_POS_HISTORY.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
+        GlobalPos latest = history.peekFirst();
+        if (latest != null && latest.dimension().equals(pos.dimension()) && latest.pos().equals(pos.pos())) {
+            return;
+        }
+
+        history.addFirst(pos);
+        while (history.size() > SAFE_POS_HISTORY_LIMIT) {
+            history.removeLast();
+        }
+    }
+
+    private static GlobalPos getBestHistoricalSafePos(UUID playerId, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, BlockPos nearPos) {
+        Deque<GlobalPos> history = SAFE_POS_HISTORY.get(playerId);
+        if (history == null || history.isEmpty()) {
+            return null;
+        }
+
+        GlobalPos best = null;
+        double bestDistanceSq = Double.MAX_VALUE;
+        for (GlobalPos candidate : history) {
+            if (!candidate.dimension().equals(dimension)) {
+                continue;
+            }
+
+            double distanceSq = candidate.pos().distSqr(nearPos);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                best = candidate;
+            }
+        }
+        return best;
     }
 
     // 辅助方法：安全的传送物品
@@ -431,7 +491,7 @@ public class DeathEventHandler {
             : null;
         if (oldSafePos != null) {
             ModEntityData.put(newPlayer, ModAttachments.SAFE_RECOVERY_POS, oldSafePos);
-            LAST_SAFE_BLOCK_POS.put(newPlayer.getUUID(), oldSafePos.pos().immutable());
+            pushSafePosHistory(newPlayer.getUUID(), oldSafePos);
         }
     }
 
@@ -443,7 +503,7 @@ public class DeathEventHandler {
         }
         SAVED_ITEMS.remove(uuid);
         INVENTORY_SNAPSHOTS.remove(uuid);
-        LAST_SAFE_BLOCK_POS.remove(uuid);
+        SAFE_POS_HISTORY.remove(uuid);
         PENDING_DEATH_POS.remove(uuid);
         PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(uuid);
     }

@@ -1,0 +1,291 @@
+package com.lenientdeath.neoforge;
+
+import com.mojang.brigadier.arguments.BoolArgumentType;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.electronwill.nightconfig.core.file.CommentedFileConfig;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
+import net.neoforged.fml.loading.FMLPaths;
+import net.neoforged.neoforge.common.ModConfigSpec;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+@SuppressWarnings("null")
+public final class ConfigCommands {
+    private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/Commands");
+
+    private ConfigCommands() {
+    }
+
+    public static void onRegisterCommands(RegisterCommandsEvent event) {
+        LiteralArgumentBuilder<CommandSourceStack> set = Commands.literal("set")
+                .then(booleanSetting("enabled", Config.COMMON.PRESERVE_ITEMS_ENABLED))
+                .then(booleanSetting("byItemTypeEnabled", Config.COMMON.BY_ITEM_TYPE_ENABLED))
+                .then(booleanSetting("deathCoordinates", Config.COMMON.DEATH_COORDS_ENABLED))
+                .then(booleanSetting("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
+                .then(booleanSetting("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
+                .then(booleanSetting("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(booleanSetting("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
+                .then(intSetting("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
+                .then(doubleSetting("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
+                .then(intSetting("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 4096))
+                .then(intSetting("voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS, 1, 1200))
+                .then(intSetting("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
+                .then(intSetting("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
+
+        LiteralArgumentBuilder<CommandSourceStack> get = Commands.literal("get")
+                .then(booleanGetter("enabled", Config.COMMON.PRESERVE_ITEMS_ENABLED))
+                .then(booleanGetter("byItemTypeEnabled", Config.COMMON.BY_ITEM_TYPE_ENABLED))
+                .then(booleanGetter("deathCoordinates", Config.COMMON.DEATH_COORDS_ENABLED))
+                .then(booleanGetter("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
+                .then(booleanGetter("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
+                .then(booleanGetter("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(booleanGetter("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
+                .then(intGetter("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
+                .then(doubleGetter("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
+                .then(intGetter("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 4096))
+                .then(intGetter("voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS, 1, 1200))
+                .then(intGetter("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
+                .then(intGetter("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
+
+        event.getDispatcher().register(
+                Commands.literal("lenientdeath")
+                        .requires(source -> source.hasPermission(2))
+                        .then(Commands.literal("config")
+                                .then(set)
+                                .then(get)
+                                .then(Commands.literal("reload")
+                                        .executes(context -> reloadFromFile(context.getSource()))))
+                        .then(Commands.literal("debug")
+                                .then(Commands.literal("status")
+                                        .executes(context -> {
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.header"), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.shared_flags", DeathEventHandler.isSharedFlagsAccessorReady()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.highlight_players", DeathEventHandler.getPrivateHighlightTrackedPlayerCount()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.saved_items", DeathEventHandler.getSavedItemsPlayerCount()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.snapshots", DeathEventHandler.getInventorySnapshotPlayerCount()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.pending_death_pos", DeathEventHandler.getPendingDeathPositionPlayerCount()), false);
+                                            return 1;
+                                        })))
+        );
+    }
+
+    private static int saveConfig(CommandSourceStack source) {
+        try {
+            Config.SPEC.save();
+            return 1;
+        } catch (Exception ex) {
+            LOGGER.error("Failed to save config", ex);
+            source.sendFailure(Component.translatable("lenientdeath.command.config.save.failed"));
+            return 0;
+        }
+    }
+
+    private static int reloadFromFile(CommandSourceStack source) {
+        Path configPath = FMLPaths.CONFIGDIR.get().resolve("lenientdeath-common.toml");
+        if (!Files.exists(configPath)) {
+            source.sendFailure(Component.translatable("lenientdeath.command.config.reload.missing", configPath.toString()));
+            return 0;
+        }
+
+        try (CommentedFileConfig fileConfig = CommentedFileConfig.builder(configPath).build()) {
+            fileConfig.load();
+
+            applyBoolean(fileConfig, "General.enabled", Config.COMMON.PRESERVE_ITEMS_ENABLED);
+
+            applyBoolean(fileConfig, "Randomizer.enabled", Config.COMMON.RANDOMIZER_ENABLED);
+            applyInt(fileConfig, "Randomizer.chancePercent", Config.COMMON.RANDOMIZER_CHANCE);
+            applyInt(fileConfig, "Randomizer.luckAdditive", Config.COMMON.LUCK_ADDITIVE);
+            applyDouble(fileConfig, "Randomizer.luckMultiplier", Config.COMMON.LUCK_MULTIPLIER);
+
+            applyBoolean(fileConfig, "NBT.enabled", Config.COMMON.NBT_ENABLED);
+            applyString(fileConfig, "NBT.nbtKey", Config.COMMON.NBT_KEY);
+
+            applyStringList(fileConfig, "Lists.alwaysPreservedItems", Config.COMMON.ALWAYS_PRESERVED_ITEMS);
+            applyStringList(fileConfig, "Lists.alwaysPreservedTags", Config.COMMON.ALWAYS_PRESERVED_TAGS);
+            applyStringList(fileConfig, "Lists.alwaysDroppedItems", Config.COMMON.ALWAYS_DROPPED_ITEMS);
+            applyStringList(fileConfig, "Lists.alwaysDroppedTags", Config.COMMON.ALWAYS_DROPPED_TAGS);
+
+            applyBoolean(fileConfig, "ItemTypes.enabled", Config.COMMON.BY_ITEM_TYPE_ENABLED);
+
+            applyEnum(fileConfig, "ItemTypes.helmets", Config.COMMON.HELMETS);
+            applyEnum(fileConfig, "ItemTypes.chestplates", Config.COMMON.CHESTPLATES);
+            applyEnum(fileConfig, "ItemTypes.leggings", Config.COMMON.LEGGINGS);
+            applyEnum(fileConfig, "ItemTypes.boots", Config.COMMON.BOOTS);
+            applyEnum(fileConfig, "ItemTypes.elytras", Config.COMMON.ELYTRAS);
+            applyEnum(fileConfig, "ItemTypes.shields", Config.COMMON.SHIELDS);
+            applyEnum(fileConfig, "ItemTypes.tools", Config.COMMON.TOOLS);
+            applyEnum(fileConfig, "ItemTypes.weapons", Config.COMMON.WEAPONS);
+            applyEnum(fileConfig, "ItemTypes.meleeWeapons", Config.COMMON.MELEE_WEAPONS);
+            applyEnum(fileConfig, "ItemTypes.rangedWeapons", Config.COMMON.RANGED_WEAPONS);
+            applyEnum(fileConfig, "ItemTypes.utilityTools", Config.COMMON.UTILITY_TOOLS);
+            applyEnum(fileConfig, "ItemTypes.fishingRods", Config.COMMON.FISHING_RODS);
+            applyEnum(fileConfig, "ItemTypes.buckets", Config.COMMON.BUCKETS);
+            applyEnum(fileConfig, "ItemTypes.enchantedBooks", Config.COMMON.ENCHANTED_BOOKS);
+            applyEnum(fileConfig, "ItemTypes.totems", Config.COMMON.TOTEMS);
+            applyEnum(fileConfig, "ItemTypes.blockItems", Config.COMMON.BLOCK_ITEMS);
+            applyEnum(fileConfig, "ItemTypes.spawnEggs", Config.COMMON.SPAWN_EGGS);
+            applyEnum(fileConfig, "ItemTypes.arrows", Config.COMMON.ARROWS);
+            applyEnum(fileConfig, "ItemTypes.food", Config.COMMON.FOOD);
+            applyEnum(fileConfig, "ItemTypes.potions", Config.COMMON.POTIONS);
+            applyEnum(fileConfig, "ItemTypes.curios", Config.COMMON.CURIOS);
+
+            applyBoolean(fileConfig, "Features.deathCoordinates", Config.COMMON.DEATH_COORDS_ENABLED);
+            applyBoolean(fileConfig, "Features.itemGlow", Config.COMMON.ITEM_GLOW_ENABLED);
+            applyInt(fileConfig, "Features.privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS);
+            applyDouble(fileConfig, "Features.privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS);
+            applyInt(fileConfig, "Features.privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES);
+            applyBoolean(fileConfig, "Features.itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED);
+            applyBoolean(fileConfig, "Features.voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED);
+            applyInt(fileConfig, "Features.voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS);
+            applyInt(fileConfig, "Features.voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES);
+            applyInt(fileConfig, "Features.voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS);
+            applyBoolean(fileConfig, "Features.restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED);
+
+            ManualAllowAndBlocklist.INSTANCE.refreshItems();
+
+            int saved = saveConfig(source);
+            if (saved == 1) {
+                source.sendSuccess(() -> Component.translatable("lenientdeath.command.config.reload.success", configPath.toString()), true);
+            }
+            return saved;
+        } catch (Exception ex) {
+            LOGGER.error("Failed to reload config from file {}", configPath, ex);
+            source.sendFailure(Component.translatable("lenientdeath.command.config.reload.failed", configPath.toString()));
+            return 0;
+        }
+    }
+
+    private static void applyBoolean(CommentedFileConfig fileConfig, String path, ModConfigSpec.BooleanValue target) {
+        Object raw = fileConfig.get(path);
+        if (raw instanceof Boolean value) {
+            target.set(value);
+        }
+    }
+
+    private static void applyInt(CommentedFileConfig fileConfig, String path, ModConfigSpec.IntValue target) {
+        Object raw = fileConfig.get(path);
+        if (raw instanceof Number value) {
+            target.set(value.intValue());
+        }
+    }
+
+    private static void applyDouble(CommentedFileConfig fileConfig, String path, ModConfigSpec.DoubleValue target) {
+        Object raw = fileConfig.get(path);
+        if (raw instanceof Number value) {
+            target.set(value.doubleValue());
+        }
+    }
+
+    private static void applyString(CommentedFileConfig fileConfig, String path, ModConfigSpec.ConfigValue<String> target) {
+        Object raw = fileConfig.get(path);
+        if (raw instanceof String value) {
+            target.set(value);
+        }
+    }
+
+    private static void applyStringList(CommentedFileConfig fileConfig, String path, ModConfigSpec.ConfigValue<List<? extends String>> target) {
+        Object raw = fileConfig.get(path);
+        if (raw instanceof List<?> list) {
+            List<String> values = list.stream().filter(String.class::isInstance).map(String.class::cast).toList();
+            target.set(values);
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static <E extends Enum<E>> void applyEnum(CommentedFileConfig fileConfig, String path, ModConfigSpec.EnumValue<E> target) {
+        Object raw = fileConfig.get(path);
+        if (raw == null) {
+            return;
+        }
+
+        if (target.get() != null && raw instanceof String enumName) {
+            Class enumClass = target.get().getDeclaringClass();
+            try {
+                E parsed = (E) Enum.valueOf(enumClass, enumName);
+                target.set(parsed);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> booleanSetting(String key, ModConfigSpec.BooleanValue value) {
+        return Commands.literal(key)
+                .then(Commands.argument("value", BoolArgumentType.bool())
+                        .executes(context -> {
+                            boolean oldValue = value.get();
+                            boolean newValue = BoolArgumentType.getBool(context, "value");
+                            value.set(newValue);
+                            int result = saveConfig(context.getSource());
+                            if (result == 1) {
+                                context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.set.applied", key, String.valueOf(newValue), String.valueOf(oldValue)), true);
+                            }
+                            LOGGER.debug("Config changed: {} {} -> {}", key, oldValue, newValue);
+                            return result;
+                        }));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> booleanGetter(String key, ModConfigSpec.BooleanValue value) {
+        return Commands.literal(key)
+                .executes(context -> {
+                    context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value", key, String.valueOf(value.get())), false);
+                    return 1;
+                });
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> intSetting(String key, ModConfigSpec.IntValue value, int min, int max) {
+        return Commands.literal(key)
+                .then(Commands.argument("value", IntegerArgumentType.integer(min, max))
+                        .executes(context -> {
+                            int oldValue = value.get();
+                            int newValue = IntegerArgumentType.getInteger(context, "value");
+                            value.set(newValue);
+                            int result = saveConfig(context.getSource());
+                            if (result == 1) {
+                                context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.set.applied_range", key, String.valueOf(newValue), String.valueOf(oldValue), String.valueOf(min), String.valueOf(max)), true);
+                            }
+                            LOGGER.debug("Config changed: {} {} -> {}", key, oldValue, newValue);
+                            return result;
+                        }));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> intGetter(String key, ModConfigSpec.IntValue value, int min, int max) {
+        return Commands.literal(key)
+                .executes(context -> {
+                    context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value_range", key, String.valueOf(value.get()), String.valueOf(min), String.valueOf(max)), false);
+                    return 1;
+                });
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> doubleSetting(String key, ModConfigSpec.DoubleValue value, double min, double max) {
+        return Commands.literal(key)
+                .then(Commands.argument("value", DoubleArgumentType.doubleArg(min, max))
+                        .executes(context -> {
+                            double oldValue = value.get();
+                            double newValue = DoubleArgumentType.getDouble(context, "value");
+                            value.set(newValue);
+                            int result = saveConfig(context.getSource());
+                            if (result == 1) {
+                                context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.set.applied_range", key, String.valueOf(newValue), String.valueOf(oldValue), String.valueOf(min), String.valueOf(max)), true);
+                            }
+                            LOGGER.debug("Config changed: {} {} -> {}", key, oldValue, newValue);
+                            return result;
+                        }));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> doubleGetter(String key, ModConfigSpec.DoubleValue value, double min, double max) {
+        return Commands.literal(key)
+                .executes(context -> {
+                    context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value_range", key, String.valueOf(value.get()), String.valueOf(min), String.valueOf(max)), false);
+                    return 1;
+                });
+    }
+}

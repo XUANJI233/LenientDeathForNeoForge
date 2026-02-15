@@ -190,6 +190,7 @@ public final class ConfigCommands {
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.header"), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.shared_flags", DeathEventHandler.isSharedFlagsAccessorReady()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.highlight_players", DeathEventHandler.getPrivateHighlightTrackedPlayerCount()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.void_recovery_debug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED.get()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.saved_items", DeathEventHandler.getSavedItemsPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.snapshots", DeathEventHandler.getInventorySnapshotPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.pending_death_pos", DeathEventHandler.getPendingDeathPositionPlayerCount()), false);

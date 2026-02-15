@@ -61,6 +61,7 @@
   "lenientdeath.command.debug.status.header": "[LenientDeath] Debug status:",
   "lenientdeath.command.debug.status.shared_flags": "- sharedFlagsAccessorReady = %s",
   "lenientdeath.command.debug.status.highlight_players": "- trackedPrivateHighlightPlayers = %s",
+  "lenientdeath.command.debug.status.void_recovery_debug": "- voidRecoveryDebug = %s",
   "lenientdeath.command.debug.status.saved_items": "- savedItemsPlayers = %s",
   "lenientdeath.command.debug.status.snapshots": "- inventorySnapshotPlayers = %s",
   "lenientdeath.command.debug.status.pending_death_pos": "- pendingDeathPosPlayers = %s",

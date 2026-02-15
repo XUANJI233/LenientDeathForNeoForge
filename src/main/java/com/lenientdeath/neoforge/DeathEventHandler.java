@@ -263,7 +263,7 @@ public class DeathEventHandler {
                 && (!ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
                 || !ModEntityData.get(item, ModAttachments.IS_DEATH_DROP))) {
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.debug("[VoidRecovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
+                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
                         item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
             }
             return;
@@ -275,29 +275,43 @@ public class DeathEventHandler {
         double predictedNextY = currentY + item.getDeltaMovement().y;
         if (currentY > triggerY && predictedNextY > triggerY) {
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.debug("[VoidRecovery] Skip item {} reason=above_trigger triggerY={} currentY={} nextY={}",
+                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} reason=above_trigger triggerY={} currentY={} nextY={}",
                         item.getId(), triggerY, currentY, predictedNextY);
             }
+            return;
+        }
+
+        // 检查是否已经恢复过（避免同一帧重复处理）
+        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED) && ModEntityData.get(item, ModAttachments.VOID_RECOVERED)) {
             return;
         }
 
         // 当前帧或下一帧将越过阈值时就触发，避免高速下坠跨帧漏判
         if (!canRecoverFromVoidNow(item)) {
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.debug("[VoidRecovery] Skip item {} reason=limiter_blocked at ({}, {}, {})",
+                LOGGER.info("[LenientDeath][VoidRecovery] Skip item {} reason=limiter_blocked at ({}, {}, {})",
                         item.getId(), item.getX(), item.getY(), item.getZ());
             }
             return;
         }
 
         if (lvl instanceof ServerLevel serverLevel) {
+            // 在传送前记录原始位置用于日志
+            double fromX = item.getX();
+            double fromY = item.getY();
+            double fromZ = item.getZ();
+
             RecoveryTarget recoveryTarget = resolveRecoveryTarget(serverLevel, item);
             teleportItemToSafety(item, recoveryTarget.pos());
+
+            // 标记已恢复，避免重复处理
+            ModEntityData.put(item, ModAttachments.VOID_RECOVERED, true);
+
             if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.debug("[VoidRecovery] Recover item {} mode={} source={} from ({}, {}, {}) -> ({}, {}, {})",
+                LOGGER.info("[LenientDeath][VoidRecovery] Recover item {} mode={} source={} from ({}, {}, {}) -> ({}, {}, {})",
                         item.getId(), recoveryMode, recoveryTarget.source(),
-                        item.getX(), item.getY(), item.getZ(),
-                        recoveryTarget.pos().getX(), recoveryTarget.pos().getY(), recoveryTarget.pos().getZ());
+                        fromX, fromY, fromZ,
+                        recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY() + 1.0, recoveryTarget.pos().getZ() + 0.5);
             }
         }
     }
@@ -416,13 +430,22 @@ public class DeathEventHandler {
 
     // 辅助方法：安全的传送物品
     private static void teleportItemToSafety(ItemEntity item, BlockPos pos) {
-        // 传送到方块中心上方
-        item.teleportTo(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
-        // 关键：重置速度，否则它会带着巨大的下坠速度继续穿过方块掉下去
+        double targetX = pos.getX() + 0.5;
+        double targetY = pos.getY() + 1.0;
+        double targetZ = pos.getZ() + 0.5;
+        
+        // 关键：先重置速度，避免传送后继续下坠
         item.setDeltaMovement(Vec3.ZERO);
+        
+        // 使用 setPos + hurtMarked 强制更新位置到客户端
+        item.setPos(targetX, targetY, targetZ);
+        item.hurtMarked = true;  // 触发位置同步到客户端
+        
         item.setNoGravity(false);
-        // 给予极短拾取冷却，避免传送帧边缘被重复处理
-        item.setPickUpDelay(10);
+        // 给予拾取冷却，让物品稳定落地后再被捡起
+        item.setPickUpDelay(20);
+        // 重置下落距离以防伤害
+        item.fallDistance = 0.0f;
         // 发光由私有高亮系统处理，不在实体上设置全局 glowing。
     }
 

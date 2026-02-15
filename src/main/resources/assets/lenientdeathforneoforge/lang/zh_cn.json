@@ -61,6 +61,7 @@
   "lenientdeath.command.debug.status.header": "[LenientDeath] 调试状态：",
   "lenientdeath.command.debug.status.shared_flags": "- sharedFlagsAccessorReady = %s",
   "lenientdeath.command.debug.status.highlight_players": "- 私有高亮跟踪玩家数 = %s",
+  "lenientdeath.command.debug.status.void_recovery_debug": "- voidRecoveryDebug = %s",
   "lenientdeath.command.debug.status.saved_items": "- 已保存物品玩家数 = %s",
   "lenientdeath.command.debug.status.snapshots": "- 背包快照玩家数 = %s",
   "lenientdeath.command.debug.status.pending_death_pos": "- 待发送死亡坐标玩家数 = %s",

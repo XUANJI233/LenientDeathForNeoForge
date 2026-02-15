@@ -71,6 +71,13 @@ public final class ModAttachments {
                 () -> AttachmentType.builder(() -> false).serialize(com.mojang.serialization.Codec.BOOL).build()
             );
 
+            // 附件8：虚空恢复完成标志（防止同帧重复处理）
+            @SuppressWarnings("unused")
+            public static final Supplier<AttachmentType<Boolean>> VOID_RECOVERED = ATTACHMENT_TYPES.register(
+                "void_recovered",
+                () -> AttachmentType.builder(() -> false).serialize(com.mojang.serialization.Codec.BOOL).build()
+            );
+
     public static void register(IEventBus bus) {
         Objects.requireNonNull(bus, "bus");
         ATTACHMENT_TYPES.register(bus);

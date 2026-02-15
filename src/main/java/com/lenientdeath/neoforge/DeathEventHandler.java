@@ -51,6 +51,8 @@ public class DeathEventHandler {
 
     private static final int SAFE_POS_UPDATE_TICKS = 10;
     private static final int SAFE_POS_HISTORY_LIMIT = 12;
+    private static final double VOID_RECOVERY_TRIGGER_OFFSET = 8.0;
+    private static final double IMMEDIATE_VOID_RECOVERY_Y_MARGIN = 8.0;
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     private static final byte GLOWING_FLAG_MASK = 0x40;
 
@@ -188,6 +190,11 @@ public class DeathEventHandler {
             lastSafePos = ModEntityData.get(player, ModAttachments.SAFE_RECOVERY_POS);
         }
 
+        ServerLevel serverLevel = player.level() instanceof ServerLevel level ? level : null;
+        boolean immediateVoidRecovery = serverLevel != null
+            && Config.COMMON.VOID_RECOVERY_ENABLED.get()
+            && shouldImmediateVoidRecover(serverLevel, player.getY());
+
         while (iterator.hasNext()) {
             ItemEntity entity = iterator.next();
             ItemStack stack = entity.getItem();
@@ -239,6 +246,10 @@ public class DeathEventHandler {
                 ModEntityData.put(entity, ModAttachments.SAFE_RECOVERY_POS, lastSafePos);
             }
 
+            if (immediateVoidRecovery && serverLevel != null) {
+                attemptImmediateRecovery(serverLevel, entity, "death_drop_immediate_void");
+            }
+
             // ORIGINAL_SLOT 已在进入循环时统一匹配并写入
         }
 
@@ -285,7 +296,7 @@ public class DeathEventHandler {
         
         // 检查虚空
         if (voidRecoveryEnabled) {
-            double triggerY = lvl.getMinBuildHeight() - 16.0;
+            double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
             double currentY = item.getY();
             double predictedNextY = currentY + item.getDeltaMovement().y;
             if (currentY <= triggerY || predictedNextY <= triggerY) {
@@ -302,7 +313,7 @@ public class DeathEventHandler {
         
         if (recoveryReason == null) {
             if (isVoidRecoveryDebugEnabled() && voidRecoveryEnabled) {
-                double triggerY = lvl.getMinBuildHeight() - 16.0;
+                double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
                 LOGGER.info("[LenientDeath][Recovery] Skip item {} reason=safe triggerY={} currentY={}",
                         item.getId(), triggerY, item.getY());
             }
@@ -587,6 +598,35 @@ public class DeathEventHandler {
         }
 
         return true;
+    }
+
+    private static double getVoidTriggerY(int minBuildHeight) {
+        return minBuildHeight - VOID_RECOVERY_TRIGGER_OFFSET;
+    }
+
+    private static boolean shouldImmediateVoidRecover(ServerLevel level, double playerY) {
+        return playerY <= level.getMinBuildHeight() + IMMEDIATE_VOID_RECOVERY_Y_MARGIN;
+    }
+
+    private static void attemptImmediateRecovery(ServerLevel level, ItemEntity item, String reason) {
+        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED) && ModEntityData.get(item, ModAttachments.VOID_RECOVERED)) {
+            return;
+        }
+
+        double fromX = item.getX();
+        double fromY = item.getY();
+        double fromZ = item.getZ();
+
+        RecoveryTarget recoveryTarget = resolveRecoveryTarget(level, item);
+        teleportItemToSafety(item, recoveryTarget.pos());
+        ModEntityData.put(item, ModAttachments.VOID_RECOVERED, true);
+
+        if (isVoidRecoveryDebugEnabled()) {
+            LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
+                    item.getId(), Config.COMMON.VOID_RECOVERY_MODE.get(), reason, recoveryTarget.source(),
+                    fromX, fromY, fromZ,
+                    recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY() + 1.0, recoveryTarget.pos().getZ() + 0.5);
+        }
     }
 
     @SubscribeEvent

@@ -111,7 +111,7 @@ alwaysDroppedTags = ["minecraft:planks"]
 - `itemGlow` controls private owner-only highlight.
 - `voidRecovery` controls safe-position recovery for dropped items in void.
 - `hazardRecovery` controls safe-position recovery for items on fire or in lava.
-- Recovered items teleport to the nearest solid surface above; falls back to player history or spawn.
+- Recovery first tries player historical safe positions; if unavailable, it searches the nearest valid 3D safe spot, then falls back near spawn.
 
 ## Development
 

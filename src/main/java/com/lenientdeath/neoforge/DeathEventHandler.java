@@ -346,93 +346,118 @@ public class DeathEventHandler {
 
     private static RecoveryTarget resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
         BlockPos itemPos = item.blockPosition();
-        int startY = itemPos.getY();
-        
-        // 策略1：从物品当前位置向上搜索最近的可落脚方块（优先找最近的平台）
-        BlockPos nearestAbove = findNearestSolidAbove(level, itemPos, startY);
-        if (nearestAbove != null) {
-            return new RecoveryTarget(nearestAbove, "nearest_above");
-        }
-        
-        // 策略2：在附近列（半径16）向上搜索
-        BlockPos nearbyAbove = findNearbyColumnSolidAbove(level, itemPos, startY, 16);
-        if (nearbyAbove != null) {
-            return new RecoveryTarget(nearbyAbove, "nearby_column");
-        }
 
-        // 策略3：使用物品上的安全位置附件
-        GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
-                ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
-                : null;
-
-        if (safePos != null && safePos.dimension() == level.dimension()) {
-            return new RecoveryTarget(safePos.pos(), "item_safe_pos");
-        }
-
-        // 策略4：使用玩家历史安全点
+        // 策略1（最高优先级）：玩家历史安全点
         if (ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
             UUID ownerId = ModEntityData.get(item, ModAttachments.OWNER_UUID);
-            GlobalPos historical = getBestHistoricalSafePos(ownerId, level.dimension(), item.blockPosition());
+            GlobalPos historical = getBestHistoricalSafePos(ownerId, level.dimension(), itemPos);
             if (historical != null) {
-                return new RecoveryTarget(historical.pos(), "owner_history");
+                BlockPos validated = validatePreferredSafePos(level, item, historical.pos());
+                if (validated != null) {
+                    return new RecoveryTarget(validated, "owner_history");
+                }
             }
         }
 
-        // 策略5：出生点
+        // 策略2：物品附件上的安全点（通常来自死亡时记录）
+        GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
+                ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
+                : null;
+        if (safePos != null && safePos.dimension() == level.dimension()) {
+            BlockPos validated = validatePreferredSafePos(level, item, safePos.pos());
+            if (validated != null) {
+                return new RecoveryTarget(validated, "item_safe_pos");
+            }
+        }
+
+        // 策略3：真正“最近”的安全位置（按三维距离）
+        BlockPos nearest = findNearestSafeSpot(level, item, itemPos, 16, 20);
+        if (nearest != null) {
+            return new RecoveryTarget(nearest, "nearest_3d");
+        }
+
+        // 策略4：出生点附近
         BlockPos spawnPos = level.getSharedSpawnPos();
-        int spawnY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, spawnPos.getX(), spawnPos.getZ());
-        if (spawnY > level.getMinBuildHeight()) {
-            return new RecoveryTarget(new BlockPos(spawnPos.getX(), spawnY, spawnPos.getZ()), "spawn_surface");
+        BlockPos spawnNearest = findNearestSafeSpot(level, item, spawnPos, 8, 20);
+        if (spawnNearest != null) {
+            return new RecoveryTarget(spawnNearest, "spawn_nearest");
         }
 
         int fallbackY = Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel());
         return new RecoveryTarget(new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ()), "spawn_fallback");
     }
 
-    /**
-     * 从指定位置向上搜索最近的可落脚方块
-     * 返回可站立的位置（固体方块上方的空气方块）
-     */
-    private static BlockPos findNearestSolidAbove(ServerLevel level, BlockPos pos, int startY) {
-        int maxY = level.getMaxBuildHeight();
-        int minY = level.getMinBuildHeight();
-        
-        // 从 startY 向上搜索第一个固体方块
-        for (int y = Math.max(startY, minY); y < maxY - 1; y++) {
-            BlockPos checkPos = new BlockPos(pos.getX(), y, pos.getZ());
-            BlockPos abovePos = checkPos.above();
-            
-            // 找到固体方块，且上方两格为空气（可站立）
-            if (!level.getBlockState(checkPos).isAir() 
-                    && level.getBlockState(abovePos).isAir()
-                    && level.getBlockState(abovePos.above()).isAir()) {
-                return abovePos; // 返回固体方块上方的位置
-            }
+    private static BlockPos validatePreferredSafePos(ServerLevel level, ItemEntity item, BlockPos preferredPos) {
+        if (isValidRecoverySpot(level, item, preferredPos)) {
+            return preferredPos;
         }
-        return null;
-    }
-    
-    /**
-     * 在附近列中向上搜索最近的可落脚方块
-     */
-    private static BlockPos findNearbyColumnSolidAbove(ServerLevel level, BlockPos center, int startY, int maxRadius) {
-        for (int radius = 1; radius <= maxRadius; radius++) {
+
+        // 安全点附近微调，避免目标点刚好被临时方块占用
+        for (int radius = 1; radius <= 3; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
-                    // 只检查当前环的边界
-                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
-                        continue;
-                    }
-                    
-                    BlockPos columnBase = new BlockPos(center.getX() + dx, startY, center.getZ() + dz);
-                    BlockPos found = findNearestSolidAbove(level, columnBase, startY);
-                    if (found != null) {
-                        return found;
+                    BlockPos candidate = preferredPos.offset(dx, 0, dz);
+                    if (isValidRecoverySpot(level, item, candidate)) {
+                        return candidate;
                     }
                 }
             }
         }
         return null;
+    }
+
+    private static BlockPos findNearestSafeSpot(ServerLevel level, ItemEntity item, BlockPos center, int horizontalRadius, int verticalRange) {
+        BlockPos best = null;
+        double bestDistanceSq = Double.MAX_VALUE;
+
+        int minY = Math.max(level.getMinBuildHeight() + 1, center.getY() - verticalRange);
+        int maxY = Math.min(level.getMaxBuildHeight() - 2, center.getY() + verticalRange);
+
+        for (int y = minY; y <= maxY; y++) {
+            for (int dx = -horizontalRadius; dx <= horizontalRadius; dx++) {
+                for (int dz = -horizontalRadius; dz <= horizontalRadius; dz++) {
+                    BlockPos candidate = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
+                    if (!isValidRecoverySpot(level, item, candidate)) {
+                        continue;
+                    }
+
+                    double distanceSq = candidate.distSqr(center);
+                    if (distanceSq < bestDistanceSq) {
+                        bestDistanceSq = distanceSq;
+                        best = candidate;
+                    }
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
+        BlockPos floorPos = feetPos.below();
+        BlockPos headPos = feetPos.above();
+
+        var floor = level.getBlockState(floorPos);
+        var feet = level.getBlockState(feetPos);
+        var head = level.getBlockState(headPos);
+
+        if (!floor.isSolidRender(level, floorPos)) {
+            return false;
+        }
+
+        if (!feet.isAir() || !head.isAir()) {
+            return false;
+        }
+
+        if (level.getFluidState(floorPos).isSource() || level.getFluidState(feetPos).isSource() || level.getFluidState(headPos).isSource()) {
+            return false;
+        }
+
+        double targetX = feetPos.getX() + 0.5;
+        double targetY = feetPos.getY() + 1.0;
+        double targetZ = feetPos.getZ() + 0.5;
+        var movedBox = item.getBoundingBox().move(targetX - item.getX(), targetY - item.getY(), targetZ - item.getZ());
+        return level.noCollision(item, movedBox);
     }
 
     private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {

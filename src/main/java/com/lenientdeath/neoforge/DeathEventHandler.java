@@ -282,24 +282,24 @@ public class DeathEventHandler {
     }
 
     private static BlockPos resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
+        BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition(), 32);
+        if (fromCurrentColumn != null) {
+            return fromCurrentColumn;
+        }
+
         GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
                 ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
                 : null;
 
         if (safePos != null && safePos.dimension() == level.dimension()) {
-            BlockPos fromSafe = findSurfaceTarget(level, safePos.pos());
+            BlockPos fromSafe = findSurfaceTarget(level, safePos.pos(), 24);
             if (fromSafe != null) {
                 return fromSafe;
             }
         }
 
-        BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition());
-        if (fromCurrentColumn != null) {
-            return fromCurrentColumn;
-        }
-
         BlockPos spawnPos = level.getSharedSpawnPos();
-        BlockPos fromSpawn = findSurfaceTarget(level, spawnPos);
+        BlockPos fromSpawn = findSurfaceTarget(level, spawnPos, 16);
         if (fromSpawn != null) {
             return fromSpawn;
         }
@@ -308,8 +308,8 @@ public class DeathEventHandler {
         return new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ());
     }
 
-    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {
-        for (int radius = 0; radius <= 16; radius++) {
+    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center, int maxRadius) {
+        for (int radius = 0; radius <= maxRadius; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     if (radius > 0 && Math.abs(dx) != radius && Math.abs(dz) != radius) {

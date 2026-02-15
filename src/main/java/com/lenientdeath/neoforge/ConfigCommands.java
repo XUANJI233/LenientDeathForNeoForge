@@ -35,6 +35,7 @@ public final class ConfigCommands {
                 .then(booleanSetting("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
                 .then(booleanSetting("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanSetting("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(enumSetting("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanSetting("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intSetting("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
                 .then(doubleSetting("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
@@ -50,6 +51,7 @@ public final class ConfigCommands {
                 .then(booleanGetter("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
                 .then(booleanGetter("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanGetter("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
+                .then(enumGetter("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanGetter("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intGetter("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
                 .then(doubleGetter("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
@@ -261,6 +263,7 @@ public final class ConfigCommands {
             applyInt(fileConfig, "Features.privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES);
             applyBoolean(fileConfig, "Features.itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED);
             applyBoolean(fileConfig, "Features.voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED);
+            applyEnum(fileConfig, "Features.voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE);
             applyInt(fileConfig, "Features.voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS);
             applyInt(fileConfig, "Features.voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES);
             applyInt(fileConfig, "Features.voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS);
@@ -401,6 +404,44 @@ public final class ConfigCommands {
         return Commands.literal(key)
                 .executes(context -> {
                     context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value_range", key, String.valueOf(value.get()), String.valueOf(min), String.valueOf(max)), false);
+                    return 1;
+                });
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static LiteralArgumentBuilder<CommandSourceStack> enumSetting(String key, ModConfigSpec.EnumValue<?> value) {
+        return Commands.literal(key)
+                .then(Commands.argument("value", StringArgumentType.word())
+                        .executes(context -> {
+                            Object oldValue = value.get();
+                            String input = StringArgumentType.getString(context, "value");
+                            if (!(oldValue instanceof Enum<?> oldEnum)) {
+                                context.getSource().sendFailure(Component.translatable("lenientdeath.command.config.set.invalid", key, input));
+                                return 0;
+                            }
+
+                            try {
+                                Class<? extends Enum> enumClass = oldEnum.getDeclaringClass();
+                                Enum<?> parsed = Enum.valueOf(enumClass, input.toUpperCase(java.util.Locale.ROOT));
+                                ((ModConfigSpec.EnumValue) value).set(parsed);
+                            } catch (IllegalArgumentException ex) {
+                                context.getSource().sendFailure(Component.translatable("lenientdeath.command.config.set.invalid", key, input));
+                                return 0;
+                            }
+
+                            int result = saveConfig(context.getSource());
+                            if (result == 1) {
+                                context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.set.applied", key, String.valueOf(value.get()), String.valueOf(oldValue)), true);
+                            }
+                            LOGGER.debug("Config changed: {} {} -> {}", key, oldValue, value.get());
+                            return result;
+                        }));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> enumGetter(String key, ModConfigSpec.EnumValue<?> value) {
+        return Commands.literal(key)
+                .executes(context -> {
+                    context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value", key, String.valueOf(value.get())), false);
                     return 1;
                 });
     }

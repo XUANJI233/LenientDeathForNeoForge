@@ -3,21 +3,10 @@
 [English README](README.md)
 
 这是 Fabric 模组 [JackFred2/LenientDeath](https://github.com/JackFred2/LenientDeath) 的 NeoForge 移植版本。
+使用大量AI进行了重构。
 
-## 如何修改配置
 
-运行时配置文件路径：
 
-- `run/config/lenientdeath-common.toml`
-
-建议在游戏或服务器停止时修改该文件，保存后重启以确保全部配置生效。
-
-### 快速操作步骤
-
-1. 若配置文件不存在，先运行一次客户端或服务端以生成配置。
-2. 打开 `run/config/lenientdeath-common.toml`。
-3. 按需修改 `[Features]`、`[ItemTypes]`、`[Lists]` 下的配置项。
-4. 保存并重启游戏/服务器。
 
 ## 游戏内命令修改（实时生效）
 
@@ -28,6 +17,7 @@
 - `/lenientdeath config set privateHighlightScanRadius 96`：设置私有高亮扫描半径（范围：`8..256`）。
 - `/lenientdeath config set privateHighlightMaxScannedEntities 256`：设置单次扫描最大处理掉落物数量（范围：`16..4096`）。
 - `/lenientdeath config set voidRecovery true`：开启/关闭虚空恢复（布尔值：`true|false`）。
+- `/lenientdeath config set voidRecoveryMode DEATH_DROPS_ONLY`：设置虚空恢复范围（`DEATH_DROPS_ONLY|ALL_DROPS`，默认 `DEATH_DROPS_ONLY`）。
 - `/lenientdeath config set voidRecoveryWindowTicks 10`：设置虚空恢复统计窗口（范围：`1..1200`）。
 - `/lenientdeath config set voidRecoveryMaxRecoveries 3`：设置窗口内最大恢复次数（范围：`1..100`）。
 - `/lenientdeath config set voidRecoveryCooldownTicks 10`：设置达到上限后的冷却时长（范围：`1..1200`）。
@@ -53,6 +43,22 @@
 - `/lenientdeath config drop tag list`：查看当前“总是掉落”标签列表。
 - `/lenientdeath debug status`：输出调试状态（高亮跟踪数量、缓存数量、关键反射状态）用于排查问题。
 
+
+## 如何修改配置
+
+运行时配置文件路径：
+
+- `run/config/lenientdeath-common.toml`
+
+建议在游戏或服务器停止时修改该文件，保存后重启以确保全部配置生效。
+
+### 快速操作步骤
+
+1. 若配置文件不存在，先运行一次客户端或服务端以生成配置。
+2. 打开 `run/config/lenientdeath-common.toml`。
+3. 按需修改 `[Features]`、`[ItemTypes]`、`[Lists]` 下的配置项。
+4. 保存并重启游戏/服务器。
+
 ## 配置示例
 
 ```toml
@@ -71,6 +77,8 @@ privateHighlightMaxScannedEntities = 256
 itemResilience = true
 # 启用虚空恢复（将掉落物挪到安全位置）
 voidRecovery = true
+# 虚空恢复范围：仅死亡掉落（默认）或全部掉落
+voidRecoveryMode = "DEATH_DROPS_ONLY"
 # 尝试把保留物品放回死亡前的原槽位
 restoreSlots = true
 
@@ -102,6 +110,8 @@ alwaysDroppedTags = ["minecraft:planks"]
 - 支持按标签强制掉落：`alwaysDroppedTags`。
 - `itemGlow` 控制是否启用“仅归属玩家可见”的私有高亮。
 - `voidRecovery` 控制是否启用掉落物虚空安全位置恢复。
+- `voidRecoveryMode` 支持 `DEATH_DROPS_ONLY`（默认，仅死亡掉落恢复）和 `ALL_DROPS`（全部掉落都恢复）。
+- 虚空恢复时会优先落到可站立表面；若附近无有效地面，会回退到世界出生点附近安全位置。
 
 ## 开发命令
 

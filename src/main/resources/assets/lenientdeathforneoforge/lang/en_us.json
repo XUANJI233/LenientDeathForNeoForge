@@ -55,6 +55,7 @@
   "lenientdeath.command.config.reload.missing": "[LenientDeath] Config file not found: %s",
   "lenientdeath.command.config.set.applied": "[LenientDeath] %s = %s (applied, was %s)",
   "lenientdeath.command.config.set.applied_range": "[LenientDeath] %s = %s (applied, was %s, range %s..%s)",
+  "lenientdeath.command.config.set.invalid": "[LenientDeath] Invalid value for %s: %s",
   "lenientdeath.command.config.get.value": "[LenientDeath] %s = %s",
   "lenientdeath.command.config.get.value_range": "[LenientDeath] %s = %s (range %s..%s)",
   "lenientdeath.command.debug.status.header": "[LenientDeath] Debug status:",

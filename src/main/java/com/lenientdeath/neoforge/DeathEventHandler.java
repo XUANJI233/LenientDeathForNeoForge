@@ -14,6 +14,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -205,6 +206,7 @@ public class DeathEventHandler {
 
             // 标记掉落物归属，供私有高亮使用
             ModEntityData.put(entity, ModAttachments.OWNER_UUID, player.getUUID());
+            ModEntityData.put(entity, ModAttachments.IS_DEATH_DROP, true);
 
             // --- A. 物品保留 ---
             int amountToKeep = PreserveItems.howManyToPreserve(player, stack);
@@ -255,6 +257,13 @@ public class DeathEventHandler {
         if (!(event.getEntity() instanceof ItemEntity item)) return;
         if (item.level().isClientSide) return;
 
+        Config.VoidRecoveryMode recoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
+        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY
+                && (!ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
+                || !ModEntityData.get(item, ModAttachments.IS_DEATH_DROP))) {
+            return;
+        }
+
         var lvl = item.level();
         double triggerY = lvl.getMinBuildHeight() - 16.0;
         if (item.getY() >= triggerY) return;
@@ -264,19 +273,62 @@ public class DeathEventHandler {
             return;
         }
 
-        // 读取物品身上记录的“安全位置”
-            GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
+        if (lvl instanceof ServerLevel serverLevel) {
+            BlockPos recoveryPos = resolveRecoveryTarget(serverLevel, item);
+            teleportItemToSafety(item, recoveryPos);
+        }
+    }
+
+    private static BlockPos resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
+        GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
                 ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
                 : null;
 
-        if (safePos != null && safePos.dimension() == lvl.dimension()) {
-            // 维度相同：直接传送
-            teleportItemToSafety(item, safePos.pos());
-        } else {
-            // 其他情况：使用兜底策略
-            BlockPos fallback = new BlockPos(item.getBlockX(), lvl.getMinBuildHeight() + 20, item.getBlockZ());
-            teleportItemToSafety(item, fallback);
+        if (safePos != null && safePos.dimension() == level.dimension()) {
+            BlockPos fromSafe = findSurfaceTarget(level, safePos.pos());
+            if (fromSafe != null) {
+                return fromSafe;
+            }
         }
+
+        BlockPos fromCurrentColumn = findSurfaceTarget(level, item.blockPosition());
+        if (fromCurrentColumn != null) {
+            return fromCurrentColumn;
+        }
+
+        BlockPos spawnPos = level.getSharedSpawnPos();
+        BlockPos fromSpawn = findSurfaceTarget(level, spawnPos);
+        if (fromSpawn != null) {
+            return fromSpawn;
+        }
+
+        int fallbackY = Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel());
+        return new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ());
+    }
+
+    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {
+        for (int radius = 0; radius <= 16; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (radius > 0 && Math.abs(dx) != radius && Math.abs(dz) != radius) {
+                        continue;
+                    }
+
+                    int x = center.getX() + dx;
+                    int z = center.getZ() + dz;
+                    int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                    if (topY <= level.getMinBuildHeight()) {
+                        continue;
+                    }
+
+                    BlockPos above = new BlockPos(x, topY, z);
+                    if (!level.getBlockState(above.below()).isAir()) {
+                        return above;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // 辅助方法：安全的传送物品

@@ -55,6 +55,7 @@
   "lenientdeath.command.config.reload.missing": "[LenientDeath] 未找到配置文件：%s",
   "lenientdeath.command.config.set.applied": "[LenientDeath] %s = %s（已应用，原值 %s）",
   "lenientdeath.command.config.set.applied_range": "[LenientDeath] %s = %s（已应用，原值 %s，范围 %s..%s）",
+  "lenientdeath.command.config.set.invalid": "[LenientDeath] %s 的值无效：%s",
   "lenientdeath.command.config.get.value": "[LenientDeath] %s = %s",
   "lenientdeath.command.config.get.value_range": "[LenientDeath] %s = %s（范围 %s..%s）",
   "lenientdeath.command.debug.status.header": "[LenientDeath] 调试状态：",

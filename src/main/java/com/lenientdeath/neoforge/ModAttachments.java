@@ -64,6 +64,13 @@ public final class ModAttachments {
                 () -> AttachmentType.builder(() -> -1).serialize(com.mojang.serialization.Codec.INT).build()
             );
 
+            // 附件7：是否为玩家死亡产生的掉落物
+            @SuppressWarnings("unused")
+            public static final Supplier<AttachmentType<Boolean>> IS_DEATH_DROP = ATTACHMENT_TYPES.register(
+                "is_death_drop",
+                () -> AttachmentType.builder(() -> false).serialize(com.mojang.serialization.Codec.BOOL).build()
+            );
+
     public static void register(IEventBus bus) {
         Objects.requireNonNull(bus, "bus");
         ATTACHMENT_TYPES.register(bus);

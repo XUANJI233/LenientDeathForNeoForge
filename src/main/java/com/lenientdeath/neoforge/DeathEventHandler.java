@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -17,6 +18,9 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
+import net.minecraft.world.scores.Team;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.common.util.TriState;
@@ -27,6 +31,7 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Collection;
@@ -81,6 +86,17 @@ public class DeathEventHandler {
     /** 反射失败时只警告一次的标志位（volatile 保证多线程可见性）。 */
     private static volatile boolean SHARED_FLAGS_ACCESSOR_WARNED = false;
 
+    /** 通过反射获取的 ItemEntity.age 字段，用于计算发光颜色。 */
+    private static final Field ITEM_ENTITY_AGE_FIELD = resolveItemEntityAgeField();
+
+    // ── 发光颜色队伍基础设施 ────────────────────────────────────
+
+    /** 用于构造队伍数据包的虚拟记分板。 */
+    private static final Scoreboard GLOW_COLOR_SCOREBOARD = new Scoreboard();
+
+    /** 每种发光颜色对应的虚拟队伍（仅用于客户端数据包，不影响服务端记分板）。 */
+    private static final Map<ChatFormatting, PlayerTeam> GLOW_COLOR_TEAMS = createGlowColorTeams();
+
     /**
      * 虚空恢复调试开关（仅运行时，不持久化到配置文件）。
      * <p>
@@ -98,8 +114,10 @@ public class DeathEventHandler {
     private static final Map<UUID, Deque<GlobalPos>> SAFE_POS_HISTORY = new ConcurrentHashMap<>();
     /** 待发送的死亡坐标消息（等到重生后发送更稳定）。 */
     private static final Map<UUID, GlobalPos> PENDING_DEATH_POS = new ConcurrentHashMap<>();
-    /** 每个玩家当前可见的私有高亮实体 ID 集合。 */
-    private static final Map<UUID, Set<Integer>> PRIVATE_HIGHLIGHTED_ENTITY_IDS = new ConcurrentHashMap<>();
+    /** 每个玩家当前可见的私有高亮实体及其颜色（实体 ID → 队伍颜色）。 */
+    private static final Map<UUID, Map<Integer, ChatFormatting>> PRIVATE_HIGHLIGHT_COLORS = new ConcurrentHashMap<>();
+    /** 已向哪些玩家发送过发光颜色队伍创建包。 */
+    private static final Set<UUID> GLOW_TEAMS_INITIALIZED = ConcurrentHashMap.newKeySet();
 
     @SuppressWarnings("unchecked")
     private static EntityDataAccessor<Byte> resolveSharedFlagsAccessor() {
@@ -111,6 +129,70 @@ public class DeathEventHandler {
             LOGGER.error("Failed to resolve Entity DATA_SHARED_FLAGS_ID, private glow will be disabled", e);
             return null;
         }
+    }
+
+    /** 反射获取 ItemEntity 的 age 字段，用于计算物品剩余寿命和发光颜色。 */
+    private static Field resolveItemEntityAgeField() {
+        try {
+            Field field = ItemEntity.class.getDeclaredField("age");
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException e) {
+            LOGGER.error("Failed to resolve ItemEntity.age field, glow color will default to green", e);
+            return null;
+        }
+    }
+
+    /** 创建每种发光颜色对应的虚拟队伍（仅用于客户端数据包中的轮廓颜色）。 */
+    private static Map<ChatFormatting, PlayerTeam> createGlowColorTeams() {
+        Map<ChatFormatting, PlayerTeam> teams = new HashMap<>();
+        ChatFormatting[] colors = {
+            ChatFormatting.BLUE, ChatFormatting.GREEN, ChatFormatting.YELLOW,
+            ChatFormatting.GOLD, ChatFormatting.RED, ChatFormatting.DARK_RED
+        };
+        for (ChatFormatting color : colors) {
+            PlayerTeam team = new PlayerTeam(GLOW_COLOR_SCOREBOARD, "ld_" + color.getName());
+            team.setColor(color);
+            team.setNameTagVisibility(Team.Visibility.NEVER);
+            teams.put(color, team);
+        }
+        return teams;
+    }
+
+    /** 读取 ItemEntity 的 age 字段值（反射）。 */
+    private static int getItemEntityAge(ItemEntity item) {
+        if (ITEM_ENTITY_AGE_FIELD == null) return 0;
+        try {
+            return ITEM_ENTITY_AGE_FIELD.getInt(item);
+        } catch (IllegalAccessException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * 根据物品剩余寿命计算发光颜色。
+     * <ul>
+     *   <li>蓝色：剩余 &gt; 5 min（仅延长寿命时可见）</li>
+     *   <li>绿色：[3 min, 5 min)</li>
+     *   <li>黄色：[2 min, 3 min)</li>
+     *   <li>橙色：[1 min, 2 min)</li>
+     *   <li>红色：[30 sec, 1 min)</li>
+     *   <li>闪烁红：[0, 30 sec)（每约 0.5 秒交替红/暗红）</li>
+     * </ul>
+     */
+    private static ChatFormatting getGlowColorForItem(ItemEntity item) {
+        int age = getItemEntityAge(item);
+        int lifespan = item.lifespan;
+        int remainingTicks = lifespan - age;
+
+        // 无限寿命 (age < 0 表示 setUnlimitedLifetime)
+        if (age < 0 || remainingTicks > 6000) return ChatFormatting.BLUE;
+        if (remainingTicks >= 3600) return ChatFormatting.GREEN;
+        if (remainingTicks >= 2400) return ChatFormatting.YELLOW;
+        if (remainingTicks >= 1200) return ChatFormatting.GOLD;  // 橙色近似
+        if (remainingTicks >= 600) return ChatFormatting.RED;
+        // 闪烁红：每 10 tick 交替
+        return (item.tickCount / 10) % 2 == 0 ? ChatFormatting.RED : ChatFormatting.DARK_RED;
     }
 
     /**
@@ -279,13 +361,29 @@ public class DeathEventHandler {
 
             // 1. 发光改为“仅归属玩家可见”的定向私有高亮（在 PlayerTick 中处理）
 
-            // 2. 防爆/防火
+            // 2. 物品韧性：防爆/防火/防仙人掌
             if (Config.COMMON.ITEM_RESILIENCE_ENABLED.get()) {
+                // 总开关：免疫所有伤害
                 entity.setInvulnerable(true);
-                entity.setUnlimitedLifetime();
+            } else if (Config.COMMON.DEATH_ITEMS_FIRE_PROOF.get()
+                    || Config.COMMON.DEATH_ITEMS_CACTUS_PROOF.get()
+                    || Config.COMMON.DEATH_ITEMS_EXPLOSION_PROOF.get()) {
+                // 分项开关：NeoForge 的 ItemEntity 不支持按伤害类型过滤，setInvulnerable 是唯一手段
+                entity.setInvulnerable(true);
             }
 
-            // 3. 写入安全位置数据 (用于防虚空)
+            // 3. 延长寿命
+            if (Config.COMMON.EXTENDED_LIFETIME_ENABLED.get()) {
+                if (Config.COMMON.DEATH_DROP_ITEMS_NEVER_DESPAWN.get()) {
+                    entity.setUnlimitedLifetime();
+                    entity.addTag("LENIENT_DEATH_INFINITE_LIFETIME");
+                } else {
+                    int lifetimeSeconds = Config.COMMON.DEATH_DROP_ITEM_LIFETIME_SECONDS.get();
+                    entity.lifespan = lifetimeSeconds * 20;
+                }
+            }
+
+            // 4. 写入安全位置数据 (用于防虚空)
             // 即使现在没掉进虚空，也要把这个“回家坐标”写在物品身上，万一它以后掉下去了呢
             if (lastSafePos != null) {
                 ModEntityData.put(entity, ModAttachments.SAFE_RECOVERY_POS, lastSafePos);
@@ -751,7 +849,8 @@ public class DeathEventHandler {
 
         // 重生后客户端会收到服务端重新同步的原始实体数据（不含发光标志），
         // 必须清空旧的高亮跟踪记录，下次 refreshPrivateHighlights 会为所有掉落物重新发送发光包。
-        PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(uuid);
+        PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
+        GLOW_TEAMS_INITIALIZED.remove(uuid);
 
         // 仅给死亡玩家自己发送死亡坐标消息（重生后发送更稳定）
         GlobalPos deathPos = PENDING_DEATH_POS.remove(uuid);
@@ -808,12 +907,16 @@ public class DeathEventHandler {
         INVENTORY_SNAPSHOTS.remove(uuid);
         SAFE_POS_HISTORY.remove(uuid);
         PENDING_DEATH_POS.remove(uuid);
-        PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(uuid);
+        PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
+        GLOW_TEAMS_INITIALIZED.remove(uuid);
     }
 
     /**
      * 刷新指定玩家的私有高亮：扫描附近归属该玩家的 ItemEntity，
-     * 发送发光数据包使仅该玩家可见。
+     * 发送发光数据包和颜色队伍数据包，根据物品剩余寿命动态着色。
+     * <p>
+     * 可见性由 {@link Config.GlowVisibility} 控制：
+     * DEAD_PLAYER / DEAD_PLAYER_AND_TEAM / EVERYONE。
      */
     private static void refreshPrivateHighlights(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel serverLevel)) {
@@ -824,14 +927,19 @@ public class DeathEventHandler {
         int maxScannedEntities = getPrivateHighlightMaxScannedEntities();
 
         UUID playerId = player.getUUID();
-        Set<Integer> previous = PRIVATE_HIGHLIGHTED_ENTITY_IDS.computeIfAbsent(playerId, ignored -> new HashSet<>());
-        Set<Integer> current = new HashSet<>();
+        Map<Integer, ChatFormatting> previous = PRIVATE_HIGHLIGHT_COLORS.computeIfAbsent(playerId, ignored -> new HashMap<>());
+        Map<Integer, ChatFormatting> current = new HashMap<>();
+
+        // 确保该玩家已收到所有颜色队伍的创建包
+        ensureGlowTeamsSent(player);
 
         List<ItemEntity> nearbyItems = serverLevel.getEntitiesOfClass(
                 ItemEntity.class,
             player.getBoundingBox().inflate(scanRadius),
                 item -> item.isAlive() && ModEntityData.has(item, ModAttachments.OWNER_UUID)
         );
+
+        Config.GlowVisibility visibility = Config.COMMON.GLOW_VISIBILITY.get();
 
         int processed = 0;
         for (ItemEntity item : nearbyItems) {
@@ -841,43 +949,120 @@ public class DeathEventHandler {
             processed++;
 
             UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
-            if (Objects.equals(owner, playerId)) {
+            boolean shouldShow = shouldShowGlowTo(player, owner, visibility, serverLevel);
+
+            if (shouldShow) {
                 int entityId = item.getId();
-                current.add(entityId);
-                if (!previous.contains(entityId)) {
+                ChatFormatting color = getGlowColorForItem(item);
+                current.put(entityId, color);
+
+                ChatFormatting prevColor = previous.get(entityId);
+                if (prevColor == null) {
+                    // 新增高亮
                     sendPrivateGlowPacket(player, item, true);
+                    sendGlowColorPacket(player, item, color);
+                } else if (prevColor != color) {
+                    // 颜色变化
+                    sendGlowColorPacket(player, item, color);
                 }
+                // 颜色相同则无需重复发送
             }
         }
 
-        for (Integer entityId : previous) {
-            if (!current.contains(entityId)) {
+        // 移除不再可见的旧高亮
+        for (var entry : previous.entrySet()) {
+            int entityId = entry.getKey();
+            if (!current.containsKey(entityId)) {
                 Entity maybeEntity = serverLevel.getEntity(entityId);
                 if (maybeEntity != null && maybeEntity.isAlive()) {
                     sendPrivateGlowPacket(player, maybeEntity, false);
+                    removeGlowColorPacket(player, maybeEntity);
                 }
             }
         }
 
-        PRIVATE_HIGHLIGHTED_ENTITY_IDS.put(playerId, current);
+        PRIVATE_HIGHLIGHT_COLORS.put(playerId, current);
+    }
+
+    /**
+     * 判断是否应该向指定玩家显示物品的发光高亮。
+     */
+    private static boolean shouldShowGlowTo(ServerPlayer viewer, UUID ownerId, Config.GlowVisibility visibility, ServerLevel level) {
+        return switch (visibility) {
+            case DEAD_PLAYER -> viewer.getUUID().equals(ownerId);
+            case EVERYONE -> true;
+            case DEAD_PLAYER_AND_TEAM -> {
+                if (viewer.getUUID().equals(ownerId)) yield true;
+                // 检查队伍
+                PlayerTeam viewerTeam = viewer.getTeam() instanceof PlayerTeam pt ? pt : null;
+                // 查找死亡玩家的队伍
+                ServerPlayer ownerPlayer = level.getServer().getPlayerList().getPlayer(ownerId);
+                PlayerTeam ownerTeam = null;
+                if (ownerPlayer != null) {
+                    ownerTeam = ownerPlayer.getTeam() instanceof PlayerTeam pt ? pt : null;
+                } else {
+                    // 玩家离线，从记分板查找
+                    Scoreboard scoreboard = level.getScoreboard();
+                    ownerTeam = scoreboard.getPlayersTeam(ownerId.toString());
+                }
+                if (ownerTeam == null && viewerTeam == null && Config.COMMON.NO_TEAM_IS_VALID_TEAM.get()) {
+                    // 双方都无队伍，且 noTeamIsValidTeam 为 true
+                    yield true;
+                }
+                yield ownerTeam != null && ownerTeam.equals(viewerTeam);
+            }
+        };
+    }
+
+    /**
+     * 确保已向玩家发送颜色队伍的创建数据包。
+     * 只在玩家首次进入高亮扫描时发送一次。
+     */
+    private static void ensureGlowTeamsSent(ServerPlayer player) {
+        if (GLOW_TEAMS_INITIALIZED.add(player.getUUID())) {
+            for (PlayerTeam team : GLOW_COLOR_TEAMS.values()) {
+                player.connection.send(ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, true));
+            }
+        }
+    }
+
+    /**
+     * 向玩家发送实体的发光颜色队伍关联数据包。
+     */
+    private static void sendGlowColorPacket(ServerPlayer viewer, Entity target, ChatFormatting color) {
+        PlayerTeam team = GLOW_COLOR_TEAMS.get(color);
+        if (team == null) return;
+        // 将实体的 UUID 字符串加入虚拟队伍
+        viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, target.getStringUUID(), ClientboundSetPlayerTeamPacket.Action.ADD));
+    }
+
+    /**
+     * 向玩家发送移除实体发光颜色队伍关联的数据包。
+     */
+    private static void removeGlowColorPacket(ServerPlayer viewer, Entity target) {
+        // 从所有颜色队伍中移除
+        for (PlayerTeam team : GLOW_COLOR_TEAMS.values()) {
+            viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, target.getStringUUID(), ClientboundSetPlayerTeamPacket.Action.REMOVE));
+        }
     }
 
     /** 清除指定玩家的所有私有高亮（关闭功能或玩家登出时调用）。 */
     private static void clearPrivateHighlights(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel serverLevel)) {
-            PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(player.getUUID());
+            PRIVATE_HIGHLIGHT_COLORS.remove(player.getUUID());
             return;
         }
 
-        Set<Integer> previous = PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(player.getUUID());
+        Map<Integer, ChatFormatting> previous = PRIVATE_HIGHLIGHT_COLORS.remove(player.getUUID());
         if (previous == null || previous.isEmpty()) {
             return;
         }
 
-        for (Integer entityId : previous) {
+        for (Integer entityId : previous.keySet()) {
             Entity maybeEntity = serverLevel.getEntity(entityId);
             if (maybeEntity != null && maybeEntity.isAlive()) {
                 sendPrivateGlowPacket(player, maybeEntity, false);
+                removeGlowColorPacket(player, maybeEntity);
             }
         }
     }
@@ -945,7 +1130,7 @@ public class DeathEventHandler {
     }
 
     public static int getPrivateHighlightTrackedPlayerCount() {
-        return PRIVATE_HIGHLIGHTED_ENTITY_IDS.size();
+        return PRIVATE_HIGHLIGHT_COLORS.size();
     }
 
     public static int getSavedItemsPlayerCount() {

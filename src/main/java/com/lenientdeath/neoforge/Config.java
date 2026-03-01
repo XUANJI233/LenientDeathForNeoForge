@@ -71,7 +71,22 @@ public class Config {
         public final ModConfigSpec.IntValue PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS;
         public final ModConfigSpec.DoubleValue PRIVATE_HIGHLIGHT_SCAN_RADIUS;
         public final ModConfigSpec.IntValue PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES;
+
+        // --- 发光可见性 ---
+        public final ModConfigSpec.EnumValue<GlowVisibility> GLOW_VISIBILITY;
+        public final ModConfigSpec.BooleanValue NO_TEAM_IS_VALID_TEAM;
+
+        // --- 物品韧性（分项） ---
         public final ModConfigSpec.BooleanValue ITEM_RESILIENCE_ENABLED;
+        public final ModConfigSpec.BooleanValue DEATH_ITEMS_FIRE_PROOF;
+        public final ModConfigSpec.BooleanValue DEATH_ITEMS_CACTUS_PROOF;
+        public final ModConfigSpec.BooleanValue DEATH_ITEMS_EXPLOSION_PROOF;
+
+        // --- 延长死亡物品寿命 ---
+        public final ModConfigSpec.BooleanValue EXTENDED_LIFETIME_ENABLED;
+        public final ModConfigSpec.IntValue DEATH_DROP_ITEM_LIFETIME_SECONDS;
+        public final ModConfigSpec.BooleanValue DEATH_DROP_ITEMS_NEVER_DESPAWN;
+
         public final ModConfigSpec.BooleanValue VOID_RECOVERY_ENABLED;
         public final ModConfigSpec.BooleanValue HAZARD_RECOVERY_ENABLED;
         public final ModConfigSpec.EnumValue<VoidRecoveryMode> VOID_RECOVERY_MODE;
@@ -186,9 +201,50 @@ public class Config {
             PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES = builder.comment(
                     "Max item entities processed per highlight scan (16–4096)\n"
                     + "每次扫描最多处理的掉落物实体数，用于限制服务器开销").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 4096);
+
+            builder.push("DroppedItemGlow");
+            GLOW_VISIBILITY = builder.comment(
+                    "Who should see the glow on death drop items?\n"
+                    + "DEAD_PLAYER = Only the player who died / 仅死亡玩家自己\n"
+                    + "DEAD_PLAYER_AND_TEAM = The dead player and anyone on the same team / 死亡玩家及同队伍玩家\n"
+                    + "EVERYONE = All online players / 所有在线玩家").defineEnum("glowVisibility", GlowVisibility.DEAD_PLAYER_AND_TEAM);
+            NO_TEAM_IS_VALID_TEAM = builder.comment(
+                    "Only applies if glowVisibility is DEAD_PLAYER_AND_TEAM.\n"
+                    + "If the dead player isn't on a team, show outline to everyone without a team?\n"
+                    + "Otherwise only shown to the dead player.\n"
+                    + "当死亡玩家没有队伍时，是否对所有无队伍玩家显示高亮？").define("noTeamIsValidTeam", true);
+            builder.pop();
+
             ITEM_RESILIENCE_ENABLED = builder.comment(
-                    "Make death-dropped items immune to fire/explosion damage\n"
-                    + "让死亡掉落物免疫火焰和爆炸伤害，减少意外销毁").define("itemResilience", true);
+                    "Master switch: make death-dropped items invulnerable to all damage\n"
+                    + "总开关：让死亡掉落物免疫所有伤害（开启时覆盖下方分项设置）").define("itemResilience", true);
+
+            builder.push("ItemResilience");
+            DEATH_ITEMS_FIRE_PROOF = builder.comment(
+                    "Death drop items are immune to fire (only checked when master switch is off)\n"
+                    + "死亡掉落物免疫火焰（仅在总开关关闭时生效）").define("allDeathItemsAreFireProof", false);
+            DEATH_ITEMS_CACTUS_PROOF = builder.comment(
+                    "Death drop items are immune to cactus (only checked when master switch is off)\n"
+                    + "死亡掉落物免疫仙人掌（仅在总开关关闭时生效）").define("allDeathItemsAreCactusProof", false);
+            DEATH_ITEMS_EXPLOSION_PROOF = builder.comment(
+                    "Death drop items are immune to explosions (only checked when master switch is off)\n"
+                    + "死亡掉落物免疫爆炸（仅在总开关关闭时生效）").define("allDeathItemsAreExplosionProof", false);
+            builder.pop();
+
+            builder.push("ExtendedDeathItemLifetime");
+            EXTENDED_LIFETIME_ENABLED = builder.comment(
+                    "Whether death drop's lifetime should be modified by LenientDeath\n"
+                    + "是否修改死亡掉落物的存在时间").define("enabled", true);
+            DEATH_DROP_ITEM_LIFETIME_SECONDS = builder.comment(
+                    "How long death drop items should last in seconds (ignored if neverDespawn is true)\n"
+                    + "死亡掉落物的存在时间（秒），neverDespawn 为 true 时忽略\n"
+                    + "300 = 5 min (vanilla), 900 = 15 min, 1800 = 30 min").defineInRange("deathDropItemLifetimeSeconds", 900, 0, 1800);
+            DEATH_DROP_ITEMS_NEVER_DESPAWN = builder.comment(
+                    "If true, death drop items will never despawn\n"
+                    + "为 true 时死亡掉落物永不消失\n"
+                    + "清理命令: /kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]").define("deathDropItemsNeverDespawn", true);
+            builder.pop();
+
             VOID_RECOVERY_ENABLED = builder.comment(
                     "Recover items that fall into the void to a safe position\n"
                     + "启用虚空恢复：当掉落物落入虚空时传送到安全位置\n"
@@ -241,6 +297,16 @@ public class Config {
     public enum VoidRecoveryMode {
         DEATH_DROPS_ONLY,
         ALL_DROPS
+    }
+
+    /** 发光高亮可见性模式。 */
+    public enum GlowVisibility {
+        /** 仅死亡玩家自己可见。 */
+        DEAD_PLAYER,
+        /** 死亡玩家及同队伍玩家可见。 */
+        DEAD_PLAYER_AND_TEAM,
+        /** 所有在线玩家可见。 */
+        EVERYONE
     }
 
     static {

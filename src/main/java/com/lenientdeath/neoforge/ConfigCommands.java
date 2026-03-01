@@ -35,7 +35,15 @@ public final class ConfigCommands {
                 .then(booleanSetting("byItemTypeEnabled", Config.COMMON.BY_ITEM_TYPE_ENABLED))
                 .then(booleanSetting("deathCoordinates", Config.COMMON.DEATH_COORDS_ENABLED))
                 .then(booleanSetting("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
+                .then(enumSetting("glowVisibility", Config.COMMON.GLOW_VISIBILITY))
+                .then(booleanSetting("noTeamIsValidTeam", Config.COMMON.NO_TEAM_IS_VALID_TEAM))
                 .then(booleanSetting("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
+                .then(booleanSetting("allDeathItemsAreFireProof", Config.COMMON.DEATH_ITEMS_FIRE_PROOF))
+                .then(booleanSetting("allDeathItemsAreCactusProof", Config.COMMON.DEATH_ITEMS_CACTUS_PROOF))
+                .then(booleanSetting("allDeathItemsAreExplosionProof", Config.COMMON.DEATH_ITEMS_EXPLOSION_PROOF))
+                .then(booleanSetting("extendedLifetimeEnabled", Config.COMMON.EXTENDED_LIFETIME_ENABLED))
+                .then(intSetting("deathDropItemLifetimeSeconds", Config.COMMON.DEATH_DROP_ITEM_LIFETIME_SECONDS, 0, 1800))
+                .then(booleanSetting("deathDropItemsNeverDespawn", Config.COMMON.DEATH_DROP_ITEMS_NEVER_DESPAWN))
                 .then(booleanSetting("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
                 .then(booleanSetting("hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED))
                 .then(Commands.literal("voidRecoveryDebug")
@@ -63,7 +71,15 @@ public final class ConfigCommands {
                 .then(booleanGetter("byItemTypeEnabled", Config.COMMON.BY_ITEM_TYPE_ENABLED))
                 .then(booleanGetter("deathCoordinates", Config.COMMON.DEATH_COORDS_ENABLED))
                 .then(booleanGetter("itemGlow", Config.COMMON.ITEM_GLOW_ENABLED))
+                .then(enumGetter("glowVisibility", Config.COMMON.GLOW_VISIBILITY))
+                .then(booleanGetter("noTeamIsValidTeam", Config.COMMON.NO_TEAM_IS_VALID_TEAM))
                 .then(booleanGetter("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
+                .then(booleanGetter("allDeathItemsAreFireProof", Config.COMMON.DEATH_ITEMS_FIRE_PROOF))
+                .then(booleanGetter("allDeathItemsAreCactusProof", Config.COMMON.DEATH_ITEMS_CACTUS_PROOF))
+                .then(booleanGetter("allDeathItemsAreExplosionProof", Config.COMMON.DEATH_ITEMS_EXPLOSION_PROOF))
+                .then(booleanGetter("extendedLifetimeEnabled", Config.COMMON.EXTENDED_LIFETIME_ENABLED))
+                .then(intGetter("deathDropItemLifetimeSeconds", Config.COMMON.DEATH_DROP_ITEM_LIFETIME_SECONDS, 0, 1800))
+                .then(booleanGetter("deathDropItemsNeverDespawn", Config.COMMON.DEATH_DROP_ITEMS_NEVER_DESPAWN))
                 .then(booleanGetter("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
                 .then(booleanGetter("hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED))
                 .then(Commands.literal("voidRecoveryDebug")
@@ -307,7 +323,15 @@ public final class ConfigCommands {
             applyInt(fileConfig, "Features.privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS);
             applyDouble(fileConfig, "Features.privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS);
             applyInt(fileConfig, "Features.privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES);
+            applyEnum(fileConfig, "DroppedItemGlow.glowVisibility", Config.COMMON.GLOW_VISIBILITY);
+            applyBoolean(fileConfig, "DroppedItemGlow.noTeamIsValidTeam", Config.COMMON.NO_TEAM_IS_VALID_TEAM);
             applyBoolean(fileConfig, "Features.itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED);
+            applyBoolean(fileConfig, "ItemResilience.allDeathItemsAreFireProof", Config.COMMON.DEATH_ITEMS_FIRE_PROOF);
+            applyBoolean(fileConfig, "ItemResilience.allDeathItemsAreCactusProof", Config.COMMON.DEATH_ITEMS_CACTUS_PROOF);
+            applyBoolean(fileConfig, "ItemResilience.allDeathItemsAreExplosionProof", Config.COMMON.DEATH_ITEMS_EXPLOSION_PROOF);
+            applyBoolean(fileConfig, "ExtendedDeathItemLifetime.enabled", Config.COMMON.EXTENDED_LIFETIME_ENABLED);
+            applyInt(fileConfig, "ExtendedDeathItemLifetime.deathDropItemLifetimeSeconds", Config.COMMON.DEATH_DROP_ITEM_LIFETIME_SECONDS);
+            applyBoolean(fileConfig, "ExtendedDeathItemLifetime.deathDropItemsNeverDespawn", Config.COMMON.DEATH_DROP_ITEMS_NEVER_DESPAWN);
             applyBoolean(fileConfig, "Features.voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED);
             applyBoolean(fileConfig, "Features.hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED);
             // voidRecoveryDebug 为运行时标志，不从文件加载

@@ -370,8 +370,10 @@ public final class ConfigCommands {
             return;
         }
 
-        if (target.get() != null && raw instanceof String enumName) {
-            Class enumClass = target.get().getDeclaringClass();
+        // 使用 getDefault() 获取枚举类，避免在 config 尚未加载时调用 get() 抛出异常
+        E defaultVal = target.getDefault();
+        if (defaultVal != null && raw instanceof String enumName) {
+            Class enumClass = defaultVal.getDeclaringClass();
             try {
                 E parsed = (E) Enum.valueOf(enumClass, enumName);
                 target.set(parsed);

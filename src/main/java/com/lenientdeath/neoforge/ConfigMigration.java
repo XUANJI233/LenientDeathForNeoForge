@@ -9,6 +9,10 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+/**
+ * 配置迁移：在服务器启动时，将旧版全局配置 (lenientdeath-common.toml)
+ * 自动迁移到每世界独立配置 (serverconfig/lenientdeath-server.toml)。
+ */
 public final class ConfigMigration {
     private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/ConfigMigration");
 

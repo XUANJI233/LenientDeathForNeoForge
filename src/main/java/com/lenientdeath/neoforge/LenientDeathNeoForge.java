@@ -6,8 +6,10 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
-import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
 
+/**
+ * LenientDeath 模组入口点：注册配置、附件、命令和事件监听。
+ */
 @Mod(LenientDeathNeoForge.MODID)
 public class LenientDeathNeoForge {
     public static final String MODID = "lenientdeath";

@@ -1,11 +1,11 @@
 package com.lenientdeath.neoforge;
 
+import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
-import com.mojang.brigadier.builder.LiteralArgumentBuilder;
-import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -19,7 +19,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-@SuppressWarnings("null")
+/**
+ * 注册并处理 {@code /lenientdeath} 命令树，包括配置读写、玩家列表操作和调试信息。
+ */
+@SuppressWarnings("null") // Minecraft API 的 @Nullable 注解误报
 public final class ConfigCommands {
     private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/Commands");
 
@@ -35,7 +38,17 @@ public final class ConfigCommands {
                 .then(booleanSetting("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanSetting("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
                 .then(booleanSetting("hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED))
-                .then(booleanSetting("voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED))
+                .then(Commands.literal("voidRecoveryDebug")
+                        .then(Commands.argument("value", BoolArgumentType.bool())
+                                .executes(context -> {
+                                    boolean oldValue = DeathEventHandler.getVoidRecoveryDebug();
+                                    boolean newValue = BoolArgumentType.getBool(context, "value");
+                                    DeathEventHandler.setVoidRecoveryDebug(newValue);
+                                    context.getSource().sendSuccess(() -> Component.translatable(
+                                            "lenientdeath.command.config.set.applied", "voidRecoveryDebug",
+                                            String.valueOf(newValue), String.valueOf(oldValue)), true);
+                                    return 1;
+                                })))
                 .then(enumSetting("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanSetting("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intSetting("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
@@ -53,7 +66,13 @@ public final class ConfigCommands {
                 .then(booleanGetter("itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED))
                 .then(booleanGetter("voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED))
                 .then(booleanGetter("hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED))
-                .then(booleanGetter("voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED))
+                .then(Commands.literal("voidRecoveryDebug")
+                        .executes(context -> {
+                            boolean val = DeathEventHandler.getVoidRecoveryDebug();
+                            context.getSource().sendSuccess(() -> Component.translatable(
+                                    "lenientdeath.command.config.get.value", "voidRecoveryDebug", String.valueOf(val)), false);
+                            return 1;
+                        }))
                 .then(enumGetter("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanGetter("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
                 .then(intGetter("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
@@ -63,7 +82,8 @@ public final class ConfigCommands {
                 .then(intGetter("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
                 .then(intGetter("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
 
-            LiteralArgumentBuilder<CommandSourceStack> preserve = Commands.literal("preserve")
+        // --- preserve: 始终保留物品/标签管理 ---
+        LiteralArgumentBuilder<CommandSourceStack> preserve = Commands.literal("preserve")
                 .then(Commands.literal("item")
                     .then(Commands.literal("add")
                         .then(Commands.argument("id", StringArgumentType.word())
@@ -119,7 +139,8 @@ public final class ConfigCommands {
                         )))
                 );
 
-            LiteralArgumentBuilder<CommandSourceStack> drop = Commands.literal("drop")
+        // --- drop: 始终掉落物品/标签管理 ---
+        LiteralArgumentBuilder<CommandSourceStack> drop = Commands.literal("drop")
                 .then(Commands.literal("item")
                     .then(Commands.literal("add")
                         .then(Commands.argument("id", StringArgumentType.word())
@@ -175,14 +196,15 @@ public final class ConfigCommands {
                         )))
                 );
 
+        // --- 注册命令树 ---
         event.getDispatcher().register(
                 Commands.literal("lenientdeath")
                         .requires(source -> source.hasPermission(2))
                         .then(Commands.literal("config")
                                 .then(set)
                                 .then(get)
-                        .then(preserve)
-                            .then(drop)
+                                .then(preserve)
+                                .then(drop)
                                 .then(Commands.literal("reload")
                                         .executes(context -> reloadFromFile(context.getSource()))))
                         .then(Commands.literal("debug")
@@ -191,7 +213,7 @@ public final class ConfigCommands {
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.header"), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.shared_flags", DeathEventHandler.isSharedFlagsAccessorReady()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.highlight_players", DeathEventHandler.getPrivateHighlightTrackedPlayerCount()), false);
-                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.void_recovery_debug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED.get()), false);
+                                            context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.void_recovery_debug", DeathEventHandler.getVoidRecoveryDebug()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.saved_items", DeathEventHandler.getSavedItemsPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.snapshots", DeathEventHandler.getInventorySnapshotPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.pending_death_pos", DeathEventHandler.getPendingDeathPositionPlayerCount()), false);
@@ -200,6 +222,7 @@ public final class ConfigCommands {
         );
     }
 
+    /** 保存配置文件。 */
     private static int saveConfig(CommandSourceStack source) {
         try {
             Config.SPEC.save();
@@ -211,6 +234,7 @@ public final class ConfigCommands {
         }
     }
 
+    /** 从世界 serverconfig 目录重新加载配置文件。 */
     private static int reloadFromFile(CommandSourceStack source) {
         Path configPath = source.getServer().getServerDirectory().resolve("serverconfig").resolve("lenientdeath-server.toml");
         if (!Files.exists(configPath)) {
@@ -227,6 +251,14 @@ public final class ConfigCommands {
         return 1;
     }
 
+    /**
+     * 从指定路径加载 TOML 配置并应用到内存中的 {@link Config.COMMON}。
+     * <p>
+     * 由 {@link ConfigMigration} 和 reload 命令共同调用。
+     *
+     * @param configPath TOML 配置文件路径
+     * @return 是否成功加载并应用
+     */
     static boolean reloadFromPath(Path configPath) {
         try (CommentedFileConfig fileConfig = CommentedFileConfig.builder(configPath).build()) {
             fileConfig.load();
@@ -278,7 +310,7 @@ public final class ConfigCommands {
             applyBoolean(fileConfig, "Features.itemResilience", Config.COMMON.ITEM_RESILIENCE_ENABLED);
             applyBoolean(fileConfig, "Features.voidRecovery", Config.COMMON.VOID_RECOVERY_ENABLED);
             applyBoolean(fileConfig, "Features.hazardRecovery", Config.COMMON.HAZARD_RECOVERY_ENABLED);
-            applyBoolean(fileConfig, "Features.voidRecoveryDebug", Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED);
+            // voidRecoveryDebug 为运行时标志，不从文件加载
             applyEnum(fileConfig, "Features.voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE);
             applyInt(fileConfig, "Features.voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS);
             applyInt(fileConfig, "Features.voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES);
@@ -422,8 +454,19 @@ public final class ConfigCommands {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static LiteralArgumentBuilder<CommandSourceStack> enumSetting(String key, ModConfigSpec.EnumValue<?> value) {
+        // 获取枚举类所有常量用于命令补全
+        Enum<?>[] constants = value.get().getDeclaringClass().getEnumConstants();
         return Commands.literal(key)
                 .then(Commands.argument("value", StringArgumentType.word())
+                        .suggests((context, builder) -> {
+                            String remaining = builder.getRemaining().toUpperCase(java.util.Locale.ROOT);
+                            for (Enum<?> e : constants) {
+                                if (e.name().toUpperCase(java.util.Locale.ROOT).startsWith(remaining)) {
+                                    builder.suggest(e.name());
+                                }
+                            }
+                            return builder.buildFuture();
+                        })
                         .executes(context -> {
                             Object oldValue = value.get();
                             String input = StringArgumentType.getString(context, "value");
@@ -453,7 +496,15 @@ public final class ConfigCommands {
     private static LiteralArgumentBuilder<CommandSourceStack> enumGetter(String key, ModConfigSpec.EnumValue<?> value) {
         return Commands.literal(key)
                 .executes(context -> {
-                    context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.config.get.value", key, String.valueOf(value.get())), false);
+                    String current = String.valueOf(value.get());
+                    Enum<?>[] constants = value.get().getDeclaringClass().getEnumConstants();
+                    StringBuilder validValues = new StringBuilder();
+                    for (int i = 0; i < constants.length; i++) {
+                        if (i > 0) validValues.append(", ");
+                        validValues.append(constants[i].name());
+                    }
+                    context.getSource().sendSuccess(() -> Component.translatable(
+                            "lenientdeath.command.config.get.value_enum", key, current, validValues.toString()), false);
                     return 1;
                 });
     }

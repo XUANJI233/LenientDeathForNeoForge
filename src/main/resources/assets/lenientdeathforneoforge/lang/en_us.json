@@ -58,6 +58,7 @@
   "lenientdeath.command.config.set.invalid": "[LenientDeath] Invalid value for %s: %s",
   "lenientdeath.command.config.get.value": "[LenientDeath] %s = %s",
   "lenientdeath.command.config.get.value_range": "[LenientDeath] %s = %s (range %s..%s)",
+  "lenientdeath.command.config.get.value_enum": "[LenientDeath] %s = %s (valid: %s)",
   "lenientdeath.command.debug.status.header": "[LenientDeath] Debug status:",
   "lenientdeath.command.debug.status.shared_flags": "- sharedFlagsAccessorReady = %s",
   "lenientdeath.command.debug.status.highlight_players": "- trackedPrivateHighlightPlayers = %s",

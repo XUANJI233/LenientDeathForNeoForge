@@ -58,6 +58,7 @@
   "lenientdeath.command.config.set.invalid": "[LenientDeath] %s 的值无效：%s",
   "lenientdeath.command.config.get.value": "[LenientDeath] %s = %s",
   "lenientdeath.command.config.get.value_range": "[LenientDeath] %s = %s（范围 %s..%s）",
+  "lenientdeath.command.config.get.value_enum": "[LenientDeath] %s = %s（可选值：%s）",
   "lenientdeath.command.debug.status.header": "[LenientDeath] 调试状态：",
   "lenientdeath.command.debug.status.shared_flags": "- sharedFlagsAccessorReady = %s",
   "lenientdeath.command.debug.status.highlight_players": "- 私有高亮跟踪玩家数 = %s",

@@ -8,23 +8,24 @@ import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
-import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.common.util.TriState;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
-import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
-import net.neoforged.neoforge.common.util.TriState;
 
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -42,27 +43,62 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-@SuppressWarnings({"unused", "null"})
+/**
+ * 核心事件处理器：处理死亡物品保留、虚空/危险恢复、私有高亮、槽位还原等逻辑。
+ * <p>
+ * 所有 {@code @SubscribeEvent} 方法由 NeoForge 事件总线反射调用。
+ */
+@SuppressWarnings({"unused", "null"}) // unused: @SubscribeEvent 方法由事件总线反射调用; null: Minecraft API 的 @Nullable 注解误报
 @EventBusSubscriber(modid = LenientDeathNeoForge.MODID)
 public class DeathEventHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/DeathEventHandler");
+
+    /** 保留物品记录：物品堆叠及其在背包中的原始槽位。 */
     private record SavedItem(ItemStack stack, int originalSlot) {}
+
+    /** 恢复目标：安全传送的目标坐标及来源策略名称（用于调试日志）。 */
     private record RecoveryTarget(BlockPos pos, String source) {}
 
+    // ── 常量 ──────────────────────────────────────────────────────
+
+    /** 安全位置更新间隔（tick），每 0.5 秒记录一次。 */
     private static final int SAFE_POS_UPDATE_TICKS = 10;
+    /** 安全位置历史记录上限。 */
     private static final int SAFE_POS_HISTORY_LIMIT = 12;
+    /** 虚空恢复触发偏移量：物品 Y 低于 (minBuildHeight - offset) 时触发。 */
     private static final double VOID_RECOVERY_TRIGGER_OFFSET = 8.0;
+    /** 即时虚空恢复判定余量：玩家死亡 Y 低于 (minBuildHeight + margin) 时，在掉落物生成时立即恢复。 */
     private static final double IMMEDIATE_VOID_RECOVERY_Y_MARGIN = 8.0;
+    /** Entity shared flags 同步数据的 slot ID（固定为 0）。 */
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
+    /** Entity shared flags 中发光位的掩码。 */
     private static final byte GLOWING_FLAG_MASK = 0x40;
 
+    // ── 反射获取的访问器 ──────────────────────────────────────────
+
+    /** 通过反射获取的 Entity.DATA_SHARED_FLAGS_ID，用于发送私有发光数据包。 */
     private static final EntityDataAccessor<Byte> SHARED_FLAGS_ACCESSOR = resolveSharedFlagsAccessor();
+    /** 反射失败时只警告一次的标志位（volatile 保证多线程可见性）。 */
     private static volatile boolean SHARED_FLAGS_ACCESSOR_WARNED = false;
 
+    /**
+     * 虚空恢复调试开关（仅运行时，不持久化到配置文件）。
+     * <p>
+     * 每次服务器/世界加载后自动重置为 {@code false}，需手动通过命令开启。
+     */
+    private static volatile boolean voidRecoveryDebug = false;
+
+    // ── 运行时状态（按玩家 UUID 索引） ────────────────────────────
+
+    /** 死亡时保留的物品，在重生（Clone 事件）时还原。 */
     private static final Map<UUID, List<SavedItem>> SAVED_ITEMS = new ConcurrentHashMap<>();
+    /** 死亡时的背包快照，用于匹配掉落物的原始槽位。 */
     private static final Map<UUID, Map<Integer, ItemStack>> INVENTORY_SNAPSHOTS = new ConcurrentHashMap<>();
+    /** 玩家安全位置的历史队列，用于恢复时查找最近的安全点。 */
     private static final Map<UUID, Deque<GlobalPos>> SAFE_POS_HISTORY = new ConcurrentHashMap<>();
+    /** 待发送的死亡坐标消息（等到重生后发送更稳定）。 */
     private static final Map<UUID, GlobalPos> PENDING_DEATH_POS = new ConcurrentHashMap<>();
+    /** 每个玩家当前可见的私有高亮实体 ID 集合。 */
     private static final Map<UUID, Set<Integer>> PRIVATE_HIGHLIGHTED_ENTITY_IDS = new ConcurrentHashMap<>();
 
     @SuppressWarnings("unchecked")
@@ -78,8 +114,9 @@ public class DeathEventHandler {
     }
 
     /**
-     * 1. 实时记录玩家的安全位置 (用于防虚空)
-     * 性能优化：每 10 tick (0.5秒) 检查一次，只在地面上时更新
+     * 玩家 tick 后处理：记录安全位置 & 刷新私有高亮。
+     * <p>
+     * 安全位置每 {@value SAFE_POS_UPDATE_TICKS} tick 更新一次，仅在地面上时记录。
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
@@ -100,15 +137,18 @@ public class DeathEventHandler {
         // 只有玩家站在地面上，且不是观察者模式时，才记录安全点历史
         if (player.tickCount % SAFE_POS_UPDATE_TICKS == 0 && player.onGround() && !player.isSpectator() && player.level() instanceof ServerLevel serverLevel) {
             BlockPos currentBlockPos = player.blockPosition();
-            BlockPos safePos = resolveStandingSafePos(serverLevel, currentBlockPos);
+            BlockPos safePos = resolveStandingSafePos(currentBlockPos);
             GlobalPos currentPos = GlobalPos.of(serverLevel.dimension(), safePos.immutable());
             pushSafePosHistory(player.getUUID(), currentPos);
             ModEntityData.put(player, ModAttachments.SAFE_RECOVERY_POS, currentPos);
         }
 
-        // No periodic scanning here — pickup is handled via ItemEntityPickupEvent for performance.
+        // 拾取逻辑由 ItemEntityPickupEvent 处理，不在此处做周期性扫描。
     }
 
+    /**
+     * 物品拾取前处理：尝试将带有原始槽位标记的物品还原到原始背包位置。
+     */
     @SubscribeEvent
     public static void onItemPickup(ItemEntityPickupEvent.Pre event) {
         if (!Config.COMMON.RESTORE_SLOTS_ENABLED.get()) return;
@@ -129,7 +169,7 @@ public class DeathEventHandler {
             int moved = originalCount - remaining.getCount();
 
             if (moved > 0) {
-                // Mutate the live stack reference instead of calling setItem in Pre (undefined behavior).
+                // 直接修改活引用的数量，不在 Pre 阶段调用 setItem（行为未定义）
                 entityStack.shrink(moved);
                 player.take(entity, moved);
 
@@ -137,14 +177,14 @@ public class DeathEventHandler {
                     entity.discard();
                 }
 
-                // We already transferred part/all items manually, deny default pickup this tick.
+                // 已手动转移物品，拒绝本 tick 的默认拾取
                 event.setCanPickup(TriState.FALSE);
             }
         }
     }
 
     /**
-     * 2. 玩家死亡瞬间：记录坐标 & 拍摄背包快照
+     * 玩家死亡瞬间：记录死亡坐标 & 拍摄背包快照（用于槽位还原）。
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
@@ -172,7 +212,7 @@ public class DeathEventHandler {
     }
 
     /**
-     * 3. 掉落物生成：核心处理
+     * 掉落物生成时的核心处理：物品保留判定、属性标记、即时虚空恢复。
      */
     @SubscribeEvent
     public static void onPlayerDrops(LivingDropsEvent event) {
@@ -260,7 +300,7 @@ public class DeathEventHandler {
     }
 
     /**
-     * 4. 危险抢救（虚空 + 火焰/岩浆）
+     * 实体 tick 前处理：对 ItemEntity 执行虚空/危险恢复。
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
@@ -286,9 +326,13 @@ public class DeathEventHandler {
             return;
         }
 
-        // 检查是否已经恢复过（避免同一帧重复处理）
-        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED) && ModEntityData.get(item, ModAttachments.VOID_RECOVERED)) {
-            return;
+        // 检查是否刚刚恢复过（避免同一tick重复处理）
+        // 使用恢复时的tick记录，仅跳过同一tick内的重复触发
+        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
+            int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
+            if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
+                return;
+            }
         }
 
         var lvl = item.level();
@@ -338,23 +382,32 @@ public class DeathEventHandler {
             RecoveryTarget recoveryTarget = resolveRecoveryTarget(serverLevel, item);
             teleportItemToSafety(item, recoveryTarget.pos());
             
-            // 火焰/岩浆恢复后熟火
+            // 火焰/岩浆恢复后灭火
             if ("lava".equals(recoveryReason) || "fire".equals(recoveryReason)) {
                 item.clearFire();
             }
 
-            // 标记已恢复，避免重复处理
-            ModEntityData.put(item, ModAttachments.VOID_RECOVERED, true);
+            // 标记恢复tick，避免同tick重复处理（但允许之后再次被拯救）
+            ModEntityData.put(item, ModAttachments.VOID_RECOVERED, item.tickCount);
 
             if (isVoidRecoveryDebugEnabled()) {
                 LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
                         item.getId(), recoveryMode, recoveryReason, recoveryTarget.source(),
                         fromX, fromY, fromZ,
-                        recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY() + 1.0, recoveryTarget.pos().getZ() + 0.5);
+                        recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY(), recoveryTarget.pos().getZ() + 0.5);
             }
         }
     }
 
+    /**
+     * 解析恢复目标坐标，按优先级尝试：
+     * <ol>
+     *   <li>玩家历史安全点（最近、同维度）</li>
+     *   <li>物品附件上的安全点（死亡时记录）</li>
+     *   <li>物品当前位置附近的有3D距离最近安全点</li>
+     *   <li>出生点附近 / 出生点回退</li>
+     * </ol>
+     */
     private static RecoveryTarget resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
         BlockPos itemPos = item.blockPosition();
 
@@ -398,6 +451,11 @@ public class DeathEventHandler {
         return new RecoveryTarget(new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ()), "spawn_fallback");
     }
 
+    /**
+     * 验证首选安全点是否可用，若不可用则在附近 3 格内微调。
+     *
+     * @return 验证后的可用位置，均不可用则返回 null
+     */
     private static BlockPos validatePreferredSafePos(ServerLevel level, ItemEntity item, BlockPos preferredPos) {
         if (isValidRecoverySpot(level, item, preferredPos)) {
             return preferredPos;
@@ -417,6 +475,13 @@ public class DeathEventHandler {
         return null;
     }
 
+    /**
+     * 在以 center 为中心的 3D 范围内搜索距离最近的安全位置。
+     *
+     * @param horizontalRadius 水平搜索半径
+     * @param verticalRange    垂直搜索范围（上下各此值）
+     * @return 最近安全位置，找不到则返回 null
+     */
     private static BlockPos findNearestSafeSpot(ServerLevel level, ItemEntity item, BlockPos center, int horizontalRadius, int verticalRange) {
         BlockPos best = null;
         double bestDistanceSq = Double.MAX_VALUE;
@@ -444,6 +509,13 @@ public class DeathEventHandler {
         return best;
     }
 
+    /**
+     * 检查给定位置是否为有效的恢复落点。
+     * <p>
+     * 要求：实心地板 + 空气脚/头 + 无流体 + 无碰撞体。
+     *
+     * @param feetPos 物品将被放置的位置（地板上方的空气方块）
+     */
     private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
         BlockPos floorPos = feetPos.below();
         BlockPos headPos = feetPos.above();
@@ -465,43 +537,25 @@ public class DeathEventHandler {
         }
 
         double targetX = feetPos.getX() + 0.5;
-        double targetY = feetPos.getY() + 1.0;
+        double targetY = feetPos.getY();
         double targetZ = feetPos.getZ() + 0.5;
         var movedBox = item.getBoundingBox().move(targetX - item.getX(), targetY - item.getY(), targetZ - item.getZ());
         return level.noCollision(item, movedBox);
     }
 
-    private static BlockPos findSurfaceTarget(ServerLevel level, BlockPos center) {
-        for (int radius = 0; radius <= 16; radius++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    if (radius > 0 && Math.abs(dx) != radius && Math.abs(dz) != radius) {
-                        continue;
-                    }
-
-                    int x = center.getX() + dx;
-                    int z = center.getZ() + dz;
-                    int topY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
-                    if (topY <= level.getMinBuildHeight()) {
-                        continue;
-                    }
-
-                    BlockPos above = new BlockPos(x, topY, z);
-                    if (!level.getBlockState(above.below()).isAir()) {
-                        return above;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    private static BlockPos resolveStandingSafePos(ServerLevel level, BlockPos playerPos) {
-        // 玩家已经 onGround()，直接使用当前位置作为安全点
-        // 不使用 Heightmap，避免返回世界最高表面而忽略中间平台
+    /**
+     * 获取玩家站立时的安全位置。
+     * <p>
+     * 由于调用时玩家已确认 {@code onGround()}，直接返回当前块位置。
+     * 不使用 Heightmap，避免返回世界最高表面而忽略中间平台。
+     */
+    private static BlockPos resolveStandingSafePos(BlockPos playerPos) {
         return playerPos;
     }
 
+    /**
+     * 将安全位置压入玩家的历史队列（去重 + 限长）。
+     */
     private static void pushSafePosHistory(UUID playerId, GlobalPos pos) {
         Deque<GlobalPos> history = SAFE_POS_HISTORY.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
         GlobalPos latest = history.peekFirst();
@@ -515,7 +569,14 @@ public class DeathEventHandler {
         }
     }
 
-    private static GlobalPos getBestHistoricalSafePos(UUID playerId, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, BlockPos nearPos) {
+    /**
+     * 从玩家历史安全点中查找同维度且距离最近的记录。
+     *
+     * @param dimension 目标维度
+     * @param nearPos   参考位置（通常为物品当前坐标）
+     * @return 最近的历史安全点，找不到则返回 null
+     */
+    private static GlobalPos getBestHistoricalSafePos(UUID playerId, ResourceKey<Level> dimension, BlockPos nearPos) {
         Deque<GlobalPos> history = SAFE_POS_HISTORY.get(playerId);
         if (history == null || history.isEmpty()) {
             return null;
@@ -537,27 +598,34 @@ public class DeathEventHandler {
         return best;
     }
 
-    // 辅助方法：安全的传送物品
+    /**
+     * 安全传送物品到指定位置。
+     * <p>
+     * pos 是 feetPos（地板上方的空气方块），物品被放在该方块底部（地板表面）。
+     * 重置速度、下落距离，并给予短暂拾取冷却让物品稳定落地。
+     */
     private static void teleportItemToSafety(ItemEntity item, BlockPos pos) {
         double targetX = pos.getX() + 0.5;
-        double targetY = pos.getY() + 1.0;
+        double targetY = pos.getY();
         double targetZ = pos.getZ() + 0.5;
         
-        // 关键：先重置速度，避免传送后继续下坠
+        // 重置速度，避免传送后继续下坠
         item.setDeltaMovement(Vec3.ZERO);
         
-        // 使用 setPos + hurtMarked 强制更新位置到客户端
+        // setPos + hurtMarked 强制同步位置到客户端
         item.setPos(targetX, targetY, targetZ);
-        item.hurtMarked = true;  // 触发位置同步到客户端
+        item.hurtMarked = true;
         
         item.setNoGravity(false);
-        // 给予拾取冷却，让物品稳定落地后再被捡起
-        item.setPickUpDelay(20);
-        // 重置下落距离以防伤害
-        item.fallDistance = 0.0f;
-        // 发光由私有高亮系统处理，不在实体上设置全局 glowing。
+        item.setPickUpDelay(20);  // 拾取冷却 1 秒
+        item.fallDistance = 0.0f; // 重置下落距离
     }
 
+    /**
+     * 限流检查：在时间窗口内限制同一物品的恢复次数，防止循环触发。
+     *
+     * @return 是否允许本次恢复
+     */
     private static boolean canRecoverFromVoidNow(ItemEntity item) {
         int now = item.tickCount;
         int windowTicks = Config.COMMON.VOID_RECOVERY_WINDOW_TICKS.get();
@@ -608,9 +676,15 @@ public class DeathEventHandler {
         return playerY <= level.getMinBuildHeight() + IMMEDIATE_VOID_RECOVERY_Y_MARGIN;
     }
 
+    /**
+     * 即时恢复：在掉落物生成时立即传送到安全位置（用于边缘场景如近虚空死亡）。
+     */
     private static void attemptImmediateRecovery(ServerLevel level, ItemEntity item, String reason) {
-        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED) && ModEntityData.get(item, ModAttachments.VOID_RECOVERED)) {
-            return;
+        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
+            int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
+            if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
+                return;
+            }
         }
 
         double fromX = item.getX();
@@ -619,16 +693,19 @@ public class DeathEventHandler {
 
         RecoveryTarget recoveryTarget = resolveRecoveryTarget(level, item);
         teleportItemToSafety(item, recoveryTarget.pos());
-        ModEntityData.put(item, ModAttachments.VOID_RECOVERED, true);
+        ModEntityData.put(item, ModAttachments.VOID_RECOVERED, item.tickCount);
 
         if (isVoidRecoveryDebugEnabled()) {
             LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
                     item.getId(), Config.COMMON.VOID_RECOVERY_MODE.get(), reason, recoveryTarget.source(),
                     fromX, fromY, fromZ,
-                    recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY() + 1.0, recoveryTarget.pos().getZ() + 0.5);
+                    recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY(), recoveryTarget.pos().getZ() + 0.5);
         }
     }
 
+    /**
+     * 玩家重生时：发送死亡坐标、还原保留物品、继承安全位置。
+     */
     @SubscribeEvent
     public static void onPlayerClone(PlayerEvent.Clone event) {
         if (!event.isWasDeath()) return;
@@ -677,6 +754,9 @@ public class DeathEventHandler {
         }
     }
 
+    /**
+     * 玩家登出时清理所有运行时状态，避免内存泄漏。
+     */
     @SubscribeEvent
     public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         UUID uuid = event.getEntity().getUUID();
@@ -690,6 +770,10 @@ public class DeathEventHandler {
         PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(uuid);
     }
 
+    /**
+     * 刷新指定玩家的私有高亮：扫描附近归属该玩家的 ItemEntity，
+     * 发送发光数据包使仅该玩家可见。
+     */
     private static void refreshPrivateHighlights(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel serverLevel)) {
             return;
@@ -737,6 +821,7 @@ public class DeathEventHandler {
         PRIVATE_HIGHLIGHTED_ENTITY_IDS.put(playerId, current);
     }
 
+    /** 清除指定玩家的所有私有高亮（关闭功能或玩家登出时调用）。 */
     private static void clearPrivateHighlights(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel serverLevel)) {
             PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(player.getUUID());
@@ -756,6 +841,10 @@ public class DeathEventHandler {
         }
     }
 
+    /**
+     * 向指定玩家发送实体发光状态的定向数据包。
+     * 仅修改该玩家客户端的发光标志，不影响服务端实体状态。
+     */
     private static void sendPrivateGlowPacket(ServerPlayer viewer, Entity target, boolean glow) {
         if (SHARED_FLAGS_ACCESSOR == null) {
             if (!SHARED_FLAGS_ACCESSOR_WARNED) {
@@ -779,6 +868,8 @@ public class DeathEventHandler {
         viewer.connection.send(new ClientboundSetEntityDataPacket(target.getId(), List.of(dataValue)));
     }
 
+    // ── 配置便捷读取 ────────────────────────────────────────────
+
     private static int getPrivateHighlightIntervalTicks() {
         return Math.max(1, Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS.get());
     }
@@ -792,9 +883,22 @@ public class DeathEventHandler {
     }
 
     private static boolean isVoidRecoveryDebugEnabled() {
-        return Config.COMMON.VOID_RECOVERY_DEBUG_ENABLED.get();
+        return voidRecoveryDebug;
     }
 
+    /** 设置虚空恢复调试开关（供命令调用）。 */
+    public static void setVoidRecoveryDebug(boolean enabled) {
+        voidRecoveryDebug = enabled;
+    }
+
+    /** 获取虚空恢复调试开关当前值。 */
+    public static boolean getVoidRecoveryDebug() {
+        return voidRecoveryDebug;
+    }
+
+    // ── 调试状态查询（供 ConfigCommands 调用） ─────────────────────
+
+    /** 反射访问器是否可用。 */
     public static boolean isSharedFlagsAccessorReady() {
         return SHARED_FLAGS_ACCESSOR != null;
     }
@@ -815,6 +919,13 @@ public class DeathEventHandler {
         return PENDING_DEATH_POS.size();
     }
 
+    // ── 物品槽位操作 ──────────────────────────────────────────────
+
+    /**
+     * 尝试将物品插入指定槽位，支持同类堆叠。
+     *
+     * @return 未能插入的剩余物品（空则表示全部插入）
+     */
     private static ItemStack insertIntoSlot(Inventory inventory, int slot, ItemStack stackToInsert) {
         if (stackToInsert.isEmpty()) {
             return ItemStack.EMPTY;

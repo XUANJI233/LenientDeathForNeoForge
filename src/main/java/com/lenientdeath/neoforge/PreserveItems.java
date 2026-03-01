@@ -6,12 +6,15 @@ import net.minecraft.world.item.ItemStack;
 import net.neoforged.fml.ModList;
 import org.jetbrains.annotations.Nullable;
 
-@SuppressWarnings("unused")
+/**
+ * 物品保留入口：判断死亡时应保留多少个物品。
+ * <p>
+ * 优先级：NBT 标记 → 手动列表 → 物品类型规则 → 随机保留。
+ */
 public class PreserveItems {
     public static final PreserveItems INSTANCE = new PreserveItems();
 
     private PreserveItems() {}
-
 
     public static int howManyToPreserve(Player player, ItemStack stack) {
         // 主开关：关闭时直接不保留

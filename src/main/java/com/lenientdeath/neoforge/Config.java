@@ -5,10 +5,21 @@ import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.List;
 
+/**
+ * 模组配置定义。配置注册为 {@code ModConfig.Type.SERVER}，每个世界独立。
+ * <p>
+ * 配置文件位于 {@code <world>/serverconfig/lenientdeath-server.toml}。
+ */
 public class Config {
     public static final ModConfigSpec SPEC;
     public static final Common COMMON;
 
+    /**
+     * 配置值定义容器。
+     * <p>
+     * 注意：类名保留为 {@code Common} 以保持历史兼容性（字段名 {@code Config.COMMON}
+     * 在整个代码库中广泛引用），实际注册类型为 SERVER。
+     */
     public static class Common {
         // --- 主开关 ---
         public final ModConfigSpec.BooleanValue PRESERVE_ITEMS_ENABLED;
@@ -63,44 +74,75 @@ public class Config {
         public final ModConfigSpec.BooleanValue ITEM_RESILIENCE_ENABLED;
         public final ModConfigSpec.BooleanValue VOID_RECOVERY_ENABLED;
         public final ModConfigSpec.BooleanValue HAZARD_RECOVERY_ENABLED;
-        public final ModConfigSpec.BooleanValue VOID_RECOVERY_DEBUG_ENABLED;
         public final ModConfigSpec.EnumValue<VoidRecoveryMode> VOID_RECOVERY_MODE;
         public final ModConfigSpec.IntValue VOID_RECOVERY_WINDOW_TICKS;
         public final ModConfigSpec.IntValue VOID_RECOVERY_MAX_RECOVERIES;
         public final ModConfigSpec.IntValue VOID_RECOVERY_COOLDOWN_TICKS;
         public final ModConfigSpec.BooleanValue RESTORE_SLOTS_ENABLED;
 
-        @SuppressWarnings({"deprecation", "null"})
+        @SuppressWarnings({"deprecation", "null"}) // deprecation: defineList 旧版重载; null: MC API 误报
         public Common(ModConfigSpec.Builder builder) {
             builder.push("General");
-            PRESERVE_ITEMS_ENABLED = builder.comment("Enable preserving items on death / 是否启用死亡保留物品").define("enabled", true);
+            PRESERVE_ITEMS_ENABLED = builder.comment(
+                    "Master switch: preserve items on death / 死亡保留物品总开关\n"
+                    + "关闭后所有保留规则均不生效，物品正常掉落").define("enabled", true);
             builder.pop();
 
             builder.push("Randomizer");
-            RANDOMIZER_ENABLED = builder.comment("Enable random preservation for leftover items / 是否对剩余物品启用随机保留").define("enabled", false);
-            RANDOMIZER_CHANCE = builder.comment("Base random keep chance percent / 基础随机保留概率（百分比）").defineInRange("chancePercent", 25, 0, 100);
-            LUCK_ADDITIVE = builder.comment("Luck additive factor percent / 幸运值附加因子（百分比）").defineInRange("luckAdditive", 20, 0, 100);
-            LUCK_MULTIPLIER = builder.comment("Luck multiplier factor / 幸运值乘算因子").defineInRange("luckMultiplier", 0.0, 0.0, 10.0);
+            RANDOMIZER_ENABLED = builder.comment(
+                    "Enable random preservation for items not matched by other rules\n"
+                    + "对未被其他规则命中的物品启用随机保留").define("enabled", false);
+            RANDOMIZER_CHANCE = builder.comment(
+                    "Base random keep chance (percent, 0–100)\n"
+                    + "基础随机保留概率（百分比），如 25 表示 25%").defineInRange("chancePercent", 25, 0, 100);
+            LUCK_ADDITIVE = builder.comment(
+                    "Luck additive factor (percent, 0–100)\n"
+                    + "幸运值加算因子（百分比），如 20 表示每点幸运额外加 20%").defineInRange("luckAdditive", 20, 0, 100);
+            LUCK_MULTIPLIER = builder.comment(
+                    "Luck multiplier factor (0.0–10.0)\n"
+                    + "幸运值乘算因子，公式：chance × (1 + multiplier × luck) + additive × luck\n"
+                    + "示例：luck=2, multiplier=1.0, additive=20, chance=25 → 25%×(1+2)+40%=115%→截取100%").defineInRange("luckMultiplier", 1.0, 0.0, 10.0);
             builder.pop();
 
             builder.push("NBT");
-            NBT_ENABLED = builder.comment("Preserve items with specific NBT tag / 是否根据 NBT 标记保留物品").define("enabled", false);
-            NBT_KEY = builder.comment("NBT boolean key used for soulbound-like behavior / 用于灵魂绑定的 NBT 布尔键名").define("nbtKey", "Soulbound");
+            NBT_ENABLED = builder.comment(
+                    "Preserve items with a specific NBT boolean tag (soulbound-like)\n"
+                    + "根据 NBT 布尔标记保留物品（类似灵魂绑定）\n"
+                    + "示例：/give @s diamond{Soulbound:1b} → 该钻石始终保留").define("enabled", false);
+            NBT_KEY = builder.comment(
+                    "NBT boolean key name used for soulbound check\n"
+                    + "灵魂绑定检查使用的 NBT 布尔键名\n"
+                    + "示例：若设为 \"Soulbound\"，则物品 CustomData 中包含 {Soulbound:1b} 时视为绑定").define("nbtKey", "Soulbound");
             builder.pop();
 
             builder.push("Lists");
-            ALWAYS_PRESERVED_ITEMS = builder.comment("List of Item IDs to always preserve (e.g. 'minecraft:apple') / 始终保留的物品 ID 列表")
+            ALWAYS_PRESERVED_ITEMS = builder.comment(
+                    "Item IDs that are always preserved on death\n"
+                    + "始终保留的物品 ID 列表\n"
+                    + "示例：[\"minecraft:totem_of_undying\", \"minecraft:elytra\"]")
                     .defineList("alwaysPreservedItems", List.of(), o -> o instanceof String);
-            ALWAYS_PRESERVED_TAGS = builder.comment("List of Item Tags to always preserve (e.g. 'minecraft:logs') / 始终保留的物品标签列表")
+            ALWAYS_PRESERVED_TAGS = builder.comment(
+                    "Item tags whose items are always preserved\n"
+                    + "始终保留的物品标签列表，命中该标签的物品将被保留\n"
+                    + "示例：[\"minecraft:logs\", \"lenientdeath:safe\"]")
                     .defineList("alwaysPreservedTags", List.of("lenientdeath:safe"), o -> o instanceof String);
-            ALWAYS_DROPPED_ITEMS = builder.comment("List of Item IDs to always drop / 始终掉落的物品 ID 列表")
+            ALWAYS_DROPPED_ITEMS = builder.comment(
+                    "Item IDs that are always dropped on death (overrides preservation)\n"
+                    + "始终掉落的物品 ID 列表（优先级高于保留）\n"
+                    + "示例：[\"minecraft:diamond\"]")
                 .defineList("alwaysDroppedItems", List.of(), o -> o instanceof String);
-            ALWAYS_DROPPED_TAGS = builder.comment("List of Item Tags to always drop / 始终掉落的物品标签列表")
+            ALWAYS_DROPPED_TAGS = builder.comment(
+                    "Item tags whose items are always dropped\n"
+                    + "始终掉落的物品标签列表\n"
+                    + "示例：[\"minecraft:planks\"]")
                 .defineList("alwaysDroppedTags", List.of(), o -> o instanceof String);
             builder.pop();
 
             builder.push("ItemTypes");
-            BY_ITEM_TYPE_ENABLED = builder.comment("Enable filtering by item type / 是否启用按物品类型规则筛选").define("enabled", true);
+            BY_ITEM_TYPE_ENABLED = builder.comment(
+                    "Enable item type rules (armor, tools, weapons, food, etc.)\n"
+                    + "启用按物品类型（护甲、工具、武器、食物等）分类处理\n"
+                    + "每个类型可设为：PRESERVE（保留）/ DROP（掉落）/ IGNORE（不做特殊处理）").define("enabled", true);
 
             HELMETS = builder.comment("Rule for helmets / 头盔规则").defineEnum("helmets", TypeBehavior.PRESERVE);
             CHESTPLATES = builder.comment("Rule for chestplates / 胸甲规则").defineEnum("chestplates", TypeBehavior.PRESERVE);
@@ -128,32 +170,66 @@ public class Config {
             builder.pop();
 
             builder.push("Features");
-            DEATH_COORDS_ENABLED = builder.comment("Show death coordinates / 是否显示死亡坐标").define("deathCoordinates", true);
-            ITEM_GLOW_ENABLED = builder.comment("Enable private owner-only item highlight / 是否启用仅归属玩家可见高亮").define("itemGlow", true);
-            PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS = builder.comment("Private highlight scan interval (ticks) / 私有高亮扫描间隔（tick）").defineInRange("privateHighlightScanIntervalTicks", 10, 1, 200);
-            PRIVATE_HIGHLIGHT_SCAN_RADIUS = builder.comment("Private highlight scan radius / 私有高亮扫描半径").defineInRange("privateHighlightScanRadius", 96.0, 8.0, 256.0);
-            PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES = builder.comment("Max entities processed per highlight scan / 每次高亮扫描最大处理实体数").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 4096);
-            ITEM_RESILIENCE_ENABLED = builder.comment("Items are immune to fire/explosion / 掉落物防火防爆").define("itemResilience", true);
-            VOID_RECOVERY_ENABLED = builder.comment("Recover void-dropped items to safe position / 启用虚空掉落物安全恢复").define("voidRecovery", true);
-            HAZARD_RECOVERY_ENABLED = builder.comment("Recover items from lava/fire to safe position / 启用岩浆/火焰掉落物安全恢复").define("hazardRecovery", true);
-            VOID_RECOVERY_DEBUG_ENABLED = builder.comment("Enable detailed void recovery debug logs / 启用虚空恢复详细调试日志").define("voidRecoveryDebug", false);
-            VOID_RECOVERY_MODE = builder.comment("Void recovery mode: DEATH_DROPS_ONLY or ALL_DROPS / 虚空恢复模式：仅死亡掉落或全部掉落").defineEnum("voidRecoveryMode", VoidRecoveryMode.DEATH_DROPS_ONLY);
-            VOID_RECOVERY_WINDOW_TICKS = builder.comment("Window ticks for void recovery limiter / 虚空恢复限流窗口（tick）").defineInRange("voidRecoveryWindowTicks", 10, 1, 1200);
-            VOID_RECOVERY_MAX_RECOVERIES = builder.comment("Max recoveries in window before cooldown / 窗口内最大恢复次数").defineInRange("voidRecoveryMaxRecoveries", 3, 1, 100);
-            VOID_RECOVERY_COOLDOWN_TICKS = builder.comment("Cooldown ticks after reaching max recoveries / 达到上限后的冷却时长（tick）").defineInRange("voidRecoveryCooldownTicks", 10, 1, 1200);
-            RESTORE_SLOTS_ENABLED = builder.comment("Restore preserved/picked items to original slots / 还原到原始槽位").define("restoreSlots", true);
+            DEATH_COORDS_ENABLED = builder.comment(
+                    "Show death coordinates in chat after respawn\n"
+                    + "重生后在聊天栏显示死亡坐标（含维度信息）").define("deathCoordinates", true);
+            ITEM_GLOW_ENABLED = builder.comment(
+                    "Enable private owner-only item glow highlight\n"
+                    + "启用私有高亮：仅物品归属的玩家能看到掉落物发光，其他玩家看不到").define("itemGlow", true);
+            PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS = builder.comment(
+                    "Private highlight scan interval in ticks (1–200)\n"
+                    + "私有高亮扫描间隔（tick），值越小刻新越快但服务器开销越大\n"
+                    + "示例：10 = 每 0.5 秒扫描一次").defineInRange("privateHighlightScanIntervalTicks", 10, 1, 200);
+            PRIVATE_HIGHLIGHT_SCAN_RADIUS = builder.comment(
+                    "Private highlight scan radius in blocks (8.0–256.0)\n"
+                    + "私有高亮扫描半径（方块），超出该范围的掉落物不会高亮").defineInRange("privateHighlightScanRadius", 96.0, 8.0, 256.0);
+            PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES = builder.comment(
+                    "Max item entities processed per highlight scan (16–4096)\n"
+                    + "每次扫描最多处理的掉落物实体数，用于限制服务器开销").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 4096);
+            ITEM_RESILIENCE_ENABLED = builder.comment(
+                    "Make death-dropped items immune to fire/explosion damage\n"
+                    + "让死亡掉落物免疫火焰和爆炸伤害，减少意外销毁").define("itemResilience", true);
+            VOID_RECOVERY_ENABLED = builder.comment(
+                    "Recover items that fall into the void to a safe position\n"
+                    + "启用虚空恢复：当掉落物落入虚空时传送到安全位置\n"
+                    + "优先使用玩家历史安全点 → 三维搜索最近安全落点 → 出生点附近").define("voidRecovery", true);
+            HAZARD_RECOVERY_ENABLED = builder.comment(
+                    "Recover items from lava/fire to a safe position\n"
+                    + "启用火焰/岩浆恢复：当掉落物着火或在岩浆中时传送到安全位置").define("hazardRecovery", true);
+            VOID_RECOVERY_MODE = builder.comment(
+                    "Void/Hazard recovery scope:\n"
+                    + "DEATH_DROPS_ONLY = only recover death-dropped items (默认，仅恢复死亡掉落物)\n"
+                    + "ALL_DROPS = recover all dropped items (恢复所有掉落物，包括主动丢弃的)").defineEnum("voidRecoveryMode", VoidRecoveryMode.DEATH_DROPS_ONLY);
+            VOID_RECOVERY_WINDOW_TICKS = builder.comment(
+                    "Rate-limit window for void recovery (ticks, 1–1200)\n"
+                    + "虚空恢复限流窗口（tick），在该时间窗口内统计恢复次数\n"
+                    + "示例：10 = 0.5 秒内最多恢复 voidRecoveryMaxRecoveries 次").defineInRange("voidRecoveryWindowTicks", 10, 1, 1200);
+            VOID_RECOVERY_MAX_RECOVERIES = builder.comment(
+                    "Max recoveries allowed inside one window (1–100)\n"
+                    + "一个窗口内允许的最大恢复次数，超出后进入冷却").defineInRange("voidRecoveryMaxRecoveries", 3, 1, 100);
+            VOID_RECOVERY_COOLDOWN_TICKS = builder.comment(
+                    "Cooldown after hitting max recoveries (ticks, 1–1200)\n"
+                    + "达到最大恢复次数后的冷却时长（tick）\n"
+                    + "示例：10 = 冷却 0.5 秒后才能再次恢复").defineInRange("voidRecoveryCooldownTicks", 10, 1, 1200);
+            RESTORE_SLOTS_ENABLED = builder.comment(
+                    "Try to restore preserved items to their original inventory slots\n"
+                    + "尝试将保留的物品放回死亡前的原始槽位（如工具栏、护甲栏等）").define("restoreSlots", true);
             builder.pop();
         }
     }
 
+    /**
+     * 物品类型策略：组合时 DROP 优先级最高，其次 PRESERVE，最后 IGNORE。
+     * <ul>
+     *   <li>任何命中 DROP → 最终 DROP</li>
+     *   <li>无 DROP 但命中 PRESERVE → 最终 PRESERVE</li>
+     *   <li>全部 IGNORE → IGNORE</li>
+     * </ul>
+     */
     public enum TypeBehavior {
         DROP, PRESERVE, IGNORE;
 
-        // 组合逻辑：DROP 优先级最高，其次 PRESERVE，最后 IGNORE。
-        // 示例：
-        // - 任何命中 DROP -> 最终 DROP
-        // - 都没有 DROP，但命中了 PRESERVE -> 最终 PRESERVE
-        // - 全部 IGNORE -> IGNORE
+        /** 将两个策略按优先级合并。 */
         public TypeBehavior and(TypeBehavior other) {
             if (this == DROP || other == DROP) return DROP;
             if (this == PRESERVE || other == PRESERVE) return PRESERVE;
@@ -161,6 +237,7 @@ public class Config {
         }
     }
 
+    /** 虚空恢复模式：仅死亡掉落物 或 所有掉落物。 */
     public enum VoidRecoveryMode {
         DEATH_DROPS_ONLY,
         ALL_DROPS

@@ -5,6 +5,9 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import org.jetbrains.annotations.Nullable;
 
+/**
+ * 随机保留器：对未被其他规则命中的物品，按基础概率 + 幸运修正随机判定保留数量。
+ */
 public class Randomizer {
     private Randomizer() {}
 

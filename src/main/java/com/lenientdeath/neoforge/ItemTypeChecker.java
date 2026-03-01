@@ -26,12 +26,23 @@ import net.minecraft.world.item.SpawnEggItem;
 import net.neoforged.fml.ModList;
 import org.jetbrains.annotations.Nullable;
 
-@SuppressWarnings("null")
+/**
+ * 按物品类型（装备、武器、工具等）判断保留/掉落策略。
+ */
+@SuppressWarnings("null") // Minecraft API 的 @Nullable 注解误报
 public class ItemTypeChecker {
     public static final ItemTypeChecker INSTANCE = new ItemTypeChecker();
     private ItemTypeChecker() {}
 
-    public @Nullable Boolean shouldKeep(@Nullable @SuppressWarnings("unused") Player player, ItemStack stack) {
+    /**
+     * 根据物品类型配置判断是否保留。
+     *
+     * @param player 玩家实例（当前未使用，保留用于未来扩展如个性化规则）
+     * @param stack  待检查物品
+     * @return {@code true} 保留，{@code false} 掉落，{@code null} 未命中任何规则
+     */
+    @SuppressWarnings("unused") // player 参数保留用于未来扩展
+    public @Nullable Boolean shouldKeep(@Nullable Player player, ItemStack stack) {
         // 1. 检查开关
         if (!Config.COMMON.BY_ITEM_TYPE_ENABLED.get()) return null;
 

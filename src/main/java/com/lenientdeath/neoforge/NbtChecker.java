@@ -4,7 +4,10 @@ import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.item.ItemStack;
 import org.jetbrains.annotations.Nullable;
 
-@SuppressWarnings("null")
+/**
+ * 根据物品的 CustomData NBT 标记判断是否保留（类似灵魂绑定）。
+ */
+@SuppressWarnings("null") // Minecraft API 的 @Nullable 注解误报
 public class NbtChecker {
     public static final NbtChecker INSTANCE = new NbtChecker();
 

@@ -15,9 +15,9 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Handles filtering of items for which should be dropped.
+ * 手动配置的始终保留/始终掉落物品列表（按 Item ID 和 Tag 筛选）。
  */
-@SuppressWarnings({"unused", "null"})
+@SuppressWarnings("null") // Minecraft API 的 @Nullable 注解误报
 public class ManualAllowAndBlocklist {
     private static final Logger LOGGER = LoggerFactory.getLogger("LenientDeath/Item Filtering");
     public static final ManualAllowAndBlocklist INSTANCE = new ManualAllowAndBlocklist();

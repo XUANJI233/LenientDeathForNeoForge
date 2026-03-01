@@ -6,6 +6,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
 
 @Mod(LenientDeathNeoForge.MODID)
 public class LenientDeathNeoForge {
@@ -23,6 +24,7 @@ public class LenientDeathNeoForge {
 
         // 注册运行时命令（服务端）
         NeoForge.EVENT_BUS.addListener(ConfigCommands::onRegisterCommands);
+        NeoForge.EVENT_BUS.addListener(ConfigMigration::onServerAboutToStart);
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {

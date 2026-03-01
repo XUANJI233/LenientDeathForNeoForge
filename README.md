@@ -19,6 +19,10 @@ Edit this file while the game/server is stopped, then restart to apply all chang
 3. Change values under sections such as `[Features]`, `[ItemTypes]`, `[Lists]`.
 4. Save and restart game/server.
 
+Migration note:
+
+- If a legacy global config `config/lenientdeath-common.toml` is found, it is automatically migrated to the current world's `serverconfig/lenientdeath-server.toml` on first start and applied immediately.
+
 ## In-Game Commands (Real-Time Apply)
 
 You can modify key config values at runtime (OP level 2+):

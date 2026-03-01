@@ -218,6 +218,16 @@ public final class ConfigCommands {
             return 0;
         }
 
+        if (!reloadFromPath(configPath)) {
+            source.sendFailure(Component.translatable("lenientdeath.command.config.reload.failed", configPath.toString()));
+            return 0;
+        }
+
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.config.reload.success", configPath.toString()), true);
+        return 1;
+    }
+
+    static boolean reloadFromPath(Path configPath) {
         try (CommentedFileConfig fileConfig = CommentedFileConfig.builder(configPath).build()) {
             fileConfig.load();
 
@@ -277,15 +287,11 @@ public final class ConfigCommands {
 
             ManualAllowAndBlocklist.INSTANCE.refreshItems();
 
-            int saved = saveConfig(source);
-            if (saved == 1) {
-                source.sendSuccess(() -> Component.translatable("lenientdeath.command.config.reload.success", configPath.toString()), true);
-            }
-            return saved;
+            Config.SPEC.save();
+            return true;
         } catch (Exception ex) {
             LOGGER.error("Failed to reload config from file {}", configPath, ex);
-            source.sendFailure(Component.translatable("lenientdeath.command.config.reload.failed", configPath.toString()));
-            return 0;
+            return false;
         }
     }
 

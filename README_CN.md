@@ -61,6 +61,10 @@
 3. 按需修改 `[Features]`、`[ItemTypes]`、`[Lists]` 下的配置项。
 4. 保存并重启游戏/服务器。
 
+兼容迁移说明：
+
+- 若检测到旧版全局配置 `config/lenientdeath-common.toml`，首次进入世界时会自动迁移到该世界的 `serverconfig/lenientdeath-server.toml` 并立即生效。
+
 ## 配置示例
 
 ```toml

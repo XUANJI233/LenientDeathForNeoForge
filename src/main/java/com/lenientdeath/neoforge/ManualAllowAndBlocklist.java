@@ -27,8 +27,8 @@ public class ManualAllowAndBlocklist {
     private final Set<Item> alwaysDroppedItems = new HashSet<>();
 
     public void setup() {
-        // 在模组初始化阶段加载一次配置和标签映射
-        refreshItems();
+        // 配置值仅在 ModConfig 加载后可读取。
+        // 实际刷新由 LenientDeathNeoForge 的配置事件监听触发。
     }
 
     protected @Nullable Boolean shouldKeep(ItemStack stack) {

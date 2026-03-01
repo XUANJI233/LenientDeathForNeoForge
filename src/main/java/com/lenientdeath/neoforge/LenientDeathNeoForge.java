@@ -4,6 +4,7 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModLoadingContext;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
 
@@ -20,6 +21,8 @@ public class LenientDeathNeoForge {
 
         // 注册初始化事件
         modEventBus.addListener(this::commonSetup);
+        modEventBus.addListener(this::onConfigLoading);
+        modEventBus.addListener(this::onConfigReloading);
 
         // 注册附件
         ModAttachments.register(modEventBus);
@@ -33,5 +36,23 @@ public class LenientDeathNeoForge {
         event.enqueueWork(() -> {
             PreserveItems.INSTANCE.setup();
         });
+    }
+
+    private void onConfigLoading(final ModConfigEvent.Loading event) {
+        onConfigEvent(event.getConfig());
+    }
+
+    private void onConfigReloading(final ModConfigEvent.Reloading event) {
+        onConfigEvent(event.getConfig());
+    }
+
+    private void onConfigEvent(final ModConfig modConfig) {
+        if (modConfig.getType() != ModConfig.Type.SERVER) {
+            return;
+        }
+        if (modConfig.getSpec() != Config.SPEC) {
+            return;
+        }
+        ManualAllowAndBlocklist.INSTANCE.refreshItems();
     }
 }

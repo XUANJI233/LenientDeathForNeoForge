@@ -4,7 +4,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemStack; // shouldKeep() 参数类型
 import net.minecraft.world.item.Items;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -67,13 +67,15 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysPreservedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                // 检查物品是否具有这个标签
-                for (Item item : BuiltInRegistries.ITEM) {
-                    ItemStack stack = new ItemStack(item);
-                    if (stack.is(tagKey)) {
-                        this.alwaysPreserved.add(item);
-                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(item));
+                // 直接从标签注册表查找，避免遍历所有注册物品
+                var tagHolder = BuiltInRegistries.ITEM.getTag(tagKey);
+                if (tagHolder.isPresent()) {
+                    for (var holder : tagHolder.get()) {
+                        this.alwaysPreserved.add(holder.value());
+                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(holder.value()));
                     }
+                } else {
+                    LOGGER.warn("Tag not found in registry: {}", tagStr);
                 }
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {
@@ -106,13 +108,15 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysDroppedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                // 检查物品是否具有这个标签
-                for (Item item : BuiltInRegistries.ITEM) {
-                    ItemStack stack = new ItemStack(item);
-                    if (stack.is(tagKey)) {
-                        this.alwaysDroppedItems.add(item);
-                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(item));
+                // 直接从标签注册表查找，避免遍历所有注册物品
+                var tagHolder = BuiltInRegistries.ITEM.getTag(tagKey);
+                if (tagHolder.isPresent()) {
+                    for (var holder : tagHolder.get()) {
+                        this.alwaysDroppedItems.add(holder.value());
+                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(holder.value()));
                     }
+                } else {
+                    LOGGER.warn("Tag not found in registry: {}", tagStr);
                 }
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {

@@ -235,6 +235,11 @@ public class DeathEventHandler {
             && Config.COMMON.VOID_RECOVERY_ENABLED.get()
             && shouldImmediateVoidRecover(serverLevel, player.getY());
 
+        // 缓存即时虚空恢复目标：同一死亡事件中所有物品共用同一恢复位置，
+        // 避免为每个掉落物重复执行昂贵的 3D 安全点搜索（resolveRecoveryTarget）
+        BlockPos cachedImmediateRecoveryPos = null;
+        String cachedImmediateRecoverySource = null;
+
         while (iterator.hasNext()) {
             ItemEntity entity = iterator.next();
             ItemStack stack = entity.getItem();
@@ -287,7 +292,23 @@ public class DeathEventHandler {
             }
 
             if (immediateVoidRecovery && serverLevel != null) {
-                attemptImmediateRecovery(serverLevel, entity, "death_drop_immediate_void");
+                if (cachedImmediateRecoveryPos == null) {
+                    RecoveryTarget rt = resolveRecoveryTarget(serverLevel, entity);
+                    cachedImmediateRecoveryPos = rt.pos();
+                    cachedImmediateRecoverySource = rt.source();
+                }
+                double fromX = entity.getX();
+                double fromY = entity.getY();
+                double fromZ = entity.getZ();
+                teleportItemToSafety(entity, cachedImmediateRecoveryPos);
+                ModEntityData.put(entity, ModAttachments.VOID_RECOVERED, entity.tickCount);
+
+                if (isVoidRecoveryDebugEnabled()) {
+                    LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger=death_drop_immediate_void source={} from ({}, {}, {}) -> ({}, {}, {})",
+                            entity.getId(), Config.COMMON.VOID_RECOVERY_MODE.get(), cachedImmediateRecoverySource,
+                            fromX, fromY, fromZ,
+                            cachedImmediateRecoveryPos.getX() + 0.5, cachedImmediateRecoveryPos.getY(), cachedImmediateRecoveryPos.getZ() + 0.5);
+                }
             }
 
             // ORIGINAL_SLOT 已在进入循环时统一匹配并写入
@@ -477,6 +498,10 @@ public class DeathEventHandler {
 
     /**
      * 在以 center 为中心的 3D 范围内搜索距离最近的安全位置。
+     * <p>
+     * 采用由中心向外扩展的环形搜索策略：每次仅检查当前半径 r 的外环方块，
+     * 当已找到安全点且其距离的平方 &lt; (r+1)² 时提前终止，跳过更远的搜索。
+     * 与暴力遍历相比，在附近存在安全点时可大幅减少方块检查次数。
      *
      * @param horizontalRadius 水平搜索半径
      * @param verticalRange    垂直搜索范围（上下各此值）
@@ -489,18 +514,30 @@ public class DeathEventHandler {
         int minY = Math.max(level.getMinBuildHeight() + 1, center.getY() - verticalRange);
         int maxY = Math.min(level.getMaxBuildHeight() - 2, center.getY() + verticalRange);
 
-        for (int y = minY; y <= maxY; y++) {
-            for (int dx = -horizontalRadius; dx <= horizontalRadius; dx++) {
-                for (int dz = -horizontalRadius; dz <= horizontalRadius; dz++) {
-                    BlockPos candidate = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
-                    if (!isValidRecoverySpot(level, item, candidate)) {
-                        continue;
-                    }
+        // 由中心向外扩展搜索，每次只检查半径为 r 的外环
+        for (int r = 0; r <= horizontalRadius; r++) {
+            // 提前终止：当前最优距离已小于下一环的最小可能距离（水平分量），
+            // 任何水平距离 >= r 的候选点不可能比当前最优更近
+            if (best != null && bestDistanceSq < (double) r * r) {
+                break;
+            }
 
-                    double distanceSq = candidate.distSqr(center);
-                    if (distanceSq < bestDistanceSq) {
-                        bestDistanceSq = distanceSq;
-                        best = candidate;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    // 只检查半径 r 的外环边界（内部已在更小半径时检查过）
+                    if (r > 0 && Math.abs(dx) < r && Math.abs(dz) < r) continue;
+
+                    for (int y = minY; y <= maxY; y++) {
+                        BlockPos candidate = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
+                        if (!isValidRecoverySpot(level, item, candidate)) {
+                            continue;
+                        }
+
+                        double distanceSq = candidate.distSqr(center);
+                        if (distanceSq < bestDistanceSq) {
+                            bestDistanceSq = distanceSq;
+                            best = candidate;
+                        }
                     }
                 }
             }

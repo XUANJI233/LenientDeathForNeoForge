@@ -454,8 +454,8 @@ public final class ConfigCommands {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static LiteralArgumentBuilder<CommandSourceStack> enumSetting(String key, ModConfigSpec.EnumValue<?> value) {
-        // 获取枚举类所有常量用于命令补全
-        Enum<?>[] constants = value.get().getDeclaringClass().getEnumConstants();
+        // 从默认值获取枚举类所有常量用于命令补全（注册时 config 尚未加载，不能调用 get()）
+        Enum<?>[] constants = ((Enum<?>) value.getDefault()).getDeclaringClass().getEnumConstants();
         return Commands.literal(key)
                 .then(Commands.argument("value", StringArgumentType.word())
                         .suggests((context, builder) -> {

@@ -712,6 +712,10 @@ public class DeathEventHandler {
         ServerPlayer newPlayer = (ServerPlayer) event.getEntity();
         UUID uuid = event.getOriginal().getUUID();
 
+        // 重生后客户端会收到服务端重新同步的原始实体数据（不含发光标志），
+        // 必须清空旧的高亮跟踪记录，下次 refreshPrivateHighlights 会为所有掉落物重新发送发光包。
+        PRIVATE_HIGHLIGHTED_ENTITY_IDS.remove(uuid);
+
         // 仅给死亡玩家自己发送死亡坐标消息（重生后发送更稳定）
         GlobalPos deathPos = PENDING_DEATH_POS.remove(uuid);
         if (deathPos != null && Config.COMMON.DEATH_COORDS_ENABLED.get()) {

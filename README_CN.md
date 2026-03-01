@@ -25,11 +25,11 @@
 - `/lenientdeath config set voidRecoveryCooldownTicks 10`：设置达到上限后的冷却时长（范围：`1..1200`）。
 - `/lenientdeath config set restoreSlots true`：开启/关闭原槽位恢复（布尔值：`true|false`）。
 
-上述命令会立即生效，并自动保存到 `lenientdeath-common.toml`。
+上述命令会立即生效，并自动保存到当前世界的 `serverconfig/lenientdeath-server.toml`。
 
 附加命令：
 
-- `/lenientdeath config reload`：从 `lenientdeath-common.toml` 重新加载配置并立即应用（用于手动改文件后生效）。
+- `/lenientdeath config reload`：从当前世界的 `serverconfig/lenientdeath-server.toml` 重新加载配置并立即应用（用于手动改文件后生效）。
 - `/lenientdeath config get <key>`：查看当前配置值（数值类会同时显示允许范围）。
 - `/lenientdeath config preserve item add <物品ID>`：添加“总是保留”物品ID（示例：`minecraft:totem_of_undying`）。
 - `/lenientdeath config preserve item remove <物品ID>`：删除“总是保留”物品ID。
@@ -48,16 +48,16 @@
 
 ## 如何修改配置
 
-运行时配置文件路径：
+运行时配置文件路径（每个世界独立）：
 
-- `run/config/lenientdeath-common.toml`
+- `<世界存档>/serverconfig/lenientdeath-server.toml`
 
 建议在游戏或服务器停止时修改该文件，保存后重启以确保全部配置生效。
 
 ### 快速操作步骤
 
 1. 若配置文件不存在，先运行一次客户端或服务端以生成配置。
-2. 打开 `run/config/lenientdeath-common.toml`。
+2. 打开 `<世界存档>/serverconfig/lenientdeath-server.toml`。
 3. 按需修改 `[Features]`、`[ItemTypes]`、`[Lists]` 下的配置项。
 4. 保存并重启游戏/服务器。
 

@@ -13,7 +13,7 @@ public class LenientDeathNeoForge {
 
     public LenientDeathNeoForge(IEventBus modEventBus) {
         // 注册配置
-        ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+        ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, Config.SPEC, "lenientdeath-server.toml");
 
         // 注册初始化事件
         modEventBus.addListener(this::commonSetup);

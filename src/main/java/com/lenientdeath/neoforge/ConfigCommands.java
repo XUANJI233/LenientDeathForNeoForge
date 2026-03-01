@@ -9,7 +9,6 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
-import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.common.ModConfigSpec;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import org.slf4j.Logger;
@@ -213,7 +212,7 @@ public final class ConfigCommands {
     }
 
     private static int reloadFromFile(CommandSourceStack source) {
-        Path configPath = FMLPaths.CONFIGDIR.get().resolve("lenientdeath-common.toml");
+        Path configPath = source.getServer().getServerDirectory().resolve("serverconfig").resolve("lenientdeath-server.toml");
         if (!Files.exists(configPath)) {
             source.sendFailure(Component.translatable("lenientdeath.command.config.reload.missing", configPath.toString()));
             return 0;

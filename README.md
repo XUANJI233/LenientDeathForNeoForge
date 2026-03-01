@@ -6,16 +6,16 @@ NeoForge port of Fabric mod [JackFred2/LenientDeath](https://github.com/JackFred
 
 ## How To Modify Configuration
 
-The runtime config file is:
+The runtime config file is (per-world independent):
 
-- `run/config/lenientdeath-common.toml`
+- `<world>/serverconfig/lenientdeath-server.toml`
 
 Edit this file while the game/server is stopped, then restart to apply all changes reliably.
 
 ### Quick Steps
 
 1. Run once to generate config files (if missing): `gradlew runClient` or your server run config.
-2. Open `run/config/lenientdeath-common.toml`.
+2. Open `<world>/serverconfig/lenientdeath-server.toml`.
 3. Change values under sections such as `[Features]`, `[ItemTypes]`, `[Lists]`.
 4. Save and restart game/server.
 
@@ -36,11 +36,11 @@ You can modify key config values at runtime (OP level 2+):
 - `/lenientdeath config set voidRecoveryCooldownTicks 10`
 - `/lenientdeath config set restoreSlots true`
 
-These commands apply immediately and auto-save to `lenientdeath-common.toml`.
+These commands apply immediately and auto-save to the current world's `serverconfig/lenientdeath-server.toml`.
 
 Additional helpers:
 
-- `/lenientdeath config reload` (reload from `lenientdeath-common.toml` and apply immediately)
+- `/lenientdeath config reload` (reload from current world's `serverconfig/lenientdeath-server.toml` and apply immediately)
 - `/lenientdeath config get <key>` (show current value; numeric keys include allowed range)
 - `/lenientdeath config preserve item add <item_id>` (add always-preserved item ID, e.g. `minecraft:totem_of_undying`)
 - `/lenientdeath config preserve item remove <item_id>` (remove always-preserved item ID)

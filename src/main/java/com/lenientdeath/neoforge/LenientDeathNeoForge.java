@@ -7,6 +7,7 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.TagsUpdatedEvent;
 
 /**
  * LenientDeath 模组入口点：注册配置、附件、命令和事件监听。
@@ -30,6 +31,7 @@ public class LenientDeathNeoForge {
         // 注册运行时命令（服务端）
         NeoForge.EVENT_BUS.addListener(ConfigCommands::onRegisterCommands);
         NeoForge.EVENT_BUS.addListener(ConfigMigration::onServerAboutToStart);
+        NeoForge.EVENT_BUS.addListener(this::onTagsUpdated);
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {
@@ -54,5 +56,16 @@ public class LenientDeathNeoForge {
             return;
         }
         ManualAllowAndBlocklist.INSTANCE.refreshItems();
+    }
+
+    /**
+     * 数据包重载（/reload）后标签内容可能变化，刷新物品列表缓存。
+     * shouldUpdateStaticData() 确保仅在服务端逻辑线程执行，
+     * 避免单人游戏中客户端线程并发修改共享集合。
+     */
+    private void onTagsUpdated(final TagsUpdatedEvent event) {
+        if (event.shouldUpdateStaticData()) {
+            ManualAllowAndBlocklist.INSTANCE.refreshItems();
+        }
     }
 }

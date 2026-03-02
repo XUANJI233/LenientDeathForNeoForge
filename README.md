@@ -20,8 +20,13 @@ All available keys, value types and descriptions:
 | `enabled` | `true` \| `false` | `true` | Master switch for preserving items on death. When off, all preservation rules are disabled. |
 | `byItemTypeEnabled` | `true` \| `false` | `true` | Master switch for item-type-based preservation (armor, tools, weapons, etc.). |
 | `deathCoordinates` | `true` \| `false` | `true` | Show death coordinates (with dimension) in chat upon respawn. |
-| `itemGlow` | `true` \| `false` | `true` | Private highlight: only the item owner can see dropped items glow. |
-| `itemResilience` | `true` \| `false` | `true` | Make death-dropped items immune to fire and explosion damage. |
+| `itemGlow` | `true` \| `false` | `true` | Private highlight: only the item owner can see dropped items glow (color changes based on remaining lifetime). |
+| `glowVisibility` | enum | `DEAD_PLAYER_AND_TEAM` | Who can see the glow: `DEAD_PLAYER` = owner only, `DEAD_PLAYER_AND_TEAM` = owner + teammates, `EVERYONE` = all players. |
+| `noTeamIsValidTeam` | `true` \| `false` | `false` | When glowVisibility is DEAD_PLAYER_AND_TEAM: if the dead player has no team, show glow to all teamless players. |
+| `itemResilience` | `true` \| `false` | `false` | Make death-dropped items invulnerable to all damage (fire, cactus, explosion, etc.). |
+| `extendedLifetimeEnabled` | `true` \| `false` | `false` | Whether to modify death drop item lifetime. |
+| `deathDropItemLifetimeSeconds` | int `0`-`1800` | `900` | Death drop lifetime in seconds (ignored if neverDespawn is true). 300=5min, 900=15min. |
+| `deathDropItemsNeverDespawn` | `true` \| `false` | `false` | Death drop items never despawn. Clean up: `/kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]` |
 | `voidRecovery` | `true` \| `false` | `true` | Void recovery: auto-teleport dropped items to a safe position when falling into the void. |
 | `hazardRecovery` | `true` \| `false` | `true` | Hazard recovery: auto-teleport dropped items to a safe position when on fire or in lava. |
 | `voidRecoveryDebug` | `true` \| `false` | `false` | Debug logging for void/hazard recovery. **Runtime-only; not saved to config; resets to `false` on world reload.** |
@@ -105,7 +110,7 @@ It is recommended to edit this file while the game/server is stopped, then resta
 
 1. If no config file exists, run the client or server once to auto-generate defaults.
 2. Open `<world>/serverconfig/lenientdeath-server.toml`.
-3. Modify values under `[General]`, `[Randomizer]`, `[NBT]`, `[Features]`, `[Lists]`, `[ItemTypes]` as needed.
+3. Modify values under `[General]`, `[Randomizer]`, `[NBT]`, `[Features]`, `[Features.DroppedItemGlow]`, `[Features.ExtendedDeathItemLifetime]`, `[Lists]`, `[ItemTypes]` as needed.
 4. Save and restart, or run `/lenientdeath config reload` in-game.
 
 ### Legacy Config Migration
@@ -147,8 +152,26 @@ privateHighlightScanIntervalTicks = 10
 privateHighlightScanRadius = 96.0
 # Max item entities processed per scan (16-4096)
 privateHighlightMaxScannedEntities = 256
-# Make death-dropped items immune to fire/explosion
-itemResilience = true
+
+[Features.DroppedItemGlow]
+# Who should see the glow: DEAD_PLAYER / DEAD_PLAYER_AND_TEAM / EVERYONE
+glowVisibility = "DEAD_PLAYER_AND_TEAM"
+# When glowVisibility is DEAD_PLAYER_AND_TEAM and the dead player has no team,
+# show outline to all teamless players?
+noTeamIsValidTeam = false
+
+# Make death drops invulnerable to all damage
+itemResilience = false
+
+[Features.ExtendedDeathItemLifetime]
+# Whether to modify death drop item lifetime
+enabled = false
+# Lifetime in seconds (ignored if neverDespawn is true)
+# 300 = 5 min (vanilla), 900 = 15 min, 1800 = 30 min
+deathDropItemLifetimeSeconds = 900
+# Never despawn; clean up: /kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]
+deathDropItemsNeverDespawn = false
+
 # Recover items from void to safe position
 voidRecovery = true
 # Recover items from fire/lava to safe position
@@ -224,8 +247,9 @@ Items are evaluated on death in the following priority order:
 
 ### Other Features
 
-- **Private Highlight** (`itemGlow`): Death-dropped items glow only for the owner; invisible to other players.
-- **Item Resilience** (`itemResilience`): Death-dropped items are immune to fire and explosion damage.
+- **Private Highlight** (`itemGlow`): Death-dropped items glow only for the owner (or teammates/everyone, configurable via `glowVisibility`). The glow color changes based on remaining lifetime: blue (>5min) -> green (3-5min) -> yellow (2-3min) -> orange (1-2min) -> red (30s-1min) -> flashing red (<30s).
+- **Item Resilience** (`itemResilience`): Make death-dropped items invulnerable to all damage (fire, cactus, explosion, etc.).
+- **Extended Lifetime** (`extendedLifetimeEnabled`): Extend death drop item lifetime beyond vanilla 5 minutes, or make them never despawn.
 - **Death Coordinates** (`deathCoordinates`): Death location and dimension shown in chat upon respawn.
 - **Slot Restoration** (`restoreSlots`): Preserved items are automatically placed back in their original inventory slots.
 

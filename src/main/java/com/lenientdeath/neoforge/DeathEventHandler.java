@@ -37,11 +37,10 @@ import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -281,7 +280,9 @@ public class DeathEventHandler {
 
         // 背包快照 (用于恢复槽位)
         if (Config.COMMON.RESTORE_SLOTS_ENABLED.get()) {
-            Map<Integer, ItemStack> snapshot = new HashMap<>();
+            // LinkedHashMap 保证按插入顺序（槽位升序）迭代，
+            // 避免 HashMap 无序导致相同物品多栈时槽位匹配不确定
+            Map<Integer, ItemStack> snapshot = new LinkedHashMap<>();
             Inventory inv = player.getInventory();
             for (int i = 0; i < inv.getContainerSize(); i++) {
                 ItemStack stack = inv.getItem(i);
@@ -328,14 +329,14 @@ public class DeathEventHandler {
             int matchedSlot = -1;
 
             if (Config.COMMON.RESTORE_SLOTS_ENABLED.get() && snapshot != null) {
-                var match = snapshot.entrySet().stream()
-                        .filter(e -> ItemStack.isSameItemSameComponents(e.getValue(), stack))
-                        .findFirst();
-
-                if (match.isPresent()) {
-                    matchedSlot = match.get().getKey();
-                    snapshot.remove(matchedSlot);
-                    ModEntityData.put(entity, ModAttachments.ORIGINAL_SLOT, matchedSlot);
+                // 使用普通 for 循环替代 stream，避免在死亡掉落循环中产生额外分配
+                for (var entry : snapshot.entrySet()) {
+                    if (ItemStack.isSameItemSameComponents(entry.getValue(), stack)) {
+                        matchedSlot = entry.getKey();
+                        snapshot.remove(matchedSlot);
+                        ModEntityData.put(entity, ModAttachments.ORIGINAL_SLOT, matchedSlot);
+                        break;
+                    }
                 }
             }
 
@@ -361,14 +362,8 @@ public class DeathEventHandler {
 
             // 1. 发光改为“仅归属玩家可见”的定向私有高亮（在 PlayerTick 中处理）
 
-            // 2. 物品韧性：防爆/防火/防仙人掌
+            // 2. 物品韧性：使掉落物免疫所有伤害
             if (Config.COMMON.ITEM_RESILIENCE_ENABLED.get()) {
-                // 总开关：免疫所有伤害
-                entity.setInvulnerable(true);
-            } else if (Config.COMMON.DEATH_ITEMS_FIRE_PROOF.get()
-                    || Config.COMMON.DEATH_ITEMS_CACTUS_PROOF.get()
-                    || Config.COMMON.DEATH_ITEMS_EXPLOSION_PROOF.get()) {
-                // 分项开关：NeoForge 的 ItemEntity 不支持按伤害类型过滤，setInvulnerable 是唯一手段
                 entity.setInvulnerable(true);
             }
 
@@ -612,6 +607,9 @@ public class DeathEventHandler {
         int minY = Math.max(level.getMinBuildHeight() + 1, center.getY() - verticalRange);
         int maxY = Math.min(level.getMaxBuildHeight() - 2, center.getY() + verticalRange);
 
+        // 使用 MutableBlockPos 避免在多重循环中大量创建 BlockPos 对象
+        BlockPos.MutableBlockPos candidate = new BlockPos.MutableBlockPos();
+
         // 由中心向外扩展搜索，每次只检查半径为 r 的外环
         for (int r = 0; r <= horizontalRadius; r++) {
             // 提前终止：当前最优距离已小于下一环的最小可能距离（水平分量），
@@ -626,7 +624,7 @@ public class DeathEventHandler {
                     if (r > 0 && Math.abs(dx) < r && Math.abs(dz) < r) continue;
 
                     for (int y = minY; y <= maxY; y++) {
-                        BlockPos candidate = new BlockPos(center.getX() + dx, y, center.getZ() + dz);
+                        candidate.set(center.getX() + dx, y, center.getZ() + dz);
                         if (!isValidRecoverySpot(level, item, candidate)) {
                             continue;
                         }
@@ -634,7 +632,7 @@ public class DeathEventHandler {
                         double distanceSq = candidate.distSqr(center);
                         if (distanceSq < bestDistanceSq) {
                             bestDistanceSq = distanceSq;
-                            best = candidate;
+                            best = candidate.immutable();
                         }
                     }
                 }
@@ -812,33 +810,6 @@ public class DeathEventHandler {
     }
 
     /**
-     * 即时恢复：在掉落物生成时立即传送到安全位置（用于边缘场景如近虚空死亡）。
-     */
-    private static void attemptImmediateRecovery(ServerLevel level, ItemEntity item, String reason) {
-        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
-            int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
-            if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
-                return;
-            }
-        }
-
-        double fromX = item.getX();
-        double fromY = item.getY();
-        double fromZ = item.getZ();
-
-        RecoveryTarget recoveryTarget = resolveRecoveryTarget(level, item);
-        teleportItemToSafety(item, recoveryTarget.pos());
-        ModEntityData.put(item, ModAttachments.VOID_RECOVERED, item.tickCount);
-
-        if (isVoidRecoveryDebugEnabled()) {
-            LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
-                    item.getId(), Config.COMMON.VOID_RECOVERY_MODE.get(), reason, recoveryTarget.source(),
-                    fromX, fromY, fromZ,
-                    recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY(), recoveryTarget.pos().getZ() + 0.5);
-        }
-    }
-
-    /**
      * 玩家重生时：发送死亡坐标、还原保留物品、继承安全位置。
      */
     @SubscribeEvent
@@ -864,9 +835,9 @@ public class DeathEventHandler {
             ).withStyle(ChatFormatting.YELLOW));
         }
 
-        // 恢复保留物品
-        if (SAVED_ITEMS.containsKey(uuid)) {
-            List<SavedItem> items = SAVED_ITEMS.get(uuid);
+        // 恢复保留物品（remove 同时获取，避免重复查找）
+        List<SavedItem> items = SAVED_ITEMS.remove(uuid);
+        if (items != null) {
             boolean restoreToSlot = Config.COMMON.RESTORE_SLOTS_ENABLED.get();
 
             for (SavedItem saved : items) {
@@ -880,7 +851,6 @@ public class DeathEventHandler {
                     newPlayer.drop(stack, true, false);
                 }
             }
-            SAVED_ITEMS.remove(uuid);
         }
 
         // 重要：在重生时，把旧玩家的“安全位置”继承给新玩家
@@ -940,6 +910,8 @@ public class DeathEventHandler {
         );
 
         Config.GlowVisibility visibility = Config.COMMON.GLOW_VISIBILITY.get();
+        // 缓存 owner -> shouldShow 结果，避免同一归属者的多个掉落物重复查询队伍/离线缓存
+        Map<UUID, Boolean> shouldShowCache = new HashMap<>();
 
         int processed = 0;
         for (ItemEntity item : nearbyItems) {
@@ -949,7 +921,8 @@ public class DeathEventHandler {
             processed++;
 
             UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
-            boolean shouldShow = shouldShowGlowTo(player, owner, visibility, serverLevel);
+            boolean shouldShow = shouldShowCache.computeIfAbsent(owner,
+                    o -> shouldShowGlowTo(player, o, visibility, serverLevel));
 
             if (shouldShow) {
                 int entityId = item.getId();
@@ -962,7 +935,8 @@ public class DeathEventHandler {
                     sendPrivateGlowPacket(player, item, true);
                     sendGlowColorPacket(player, item, color);
                 } else if (prevColor != color) {
-                    // 颜色变化
+                    // 颜色变化：先从旧队伍移除，再加入新队伍
+                    removeGlowColorPacket(player, item, prevColor);
                     sendGlowColorPacket(player, item, color);
                 }
                 // 颜色相同则无需重复发送
@@ -976,7 +950,7 @@ public class DeathEventHandler {
                 Entity maybeEntity = serverLevel.getEntity(entityId);
                 if (maybeEntity != null && maybeEntity.isAlive()) {
                     sendPrivateGlowPacket(player, maybeEntity, false);
-                    removeGlowColorPacket(player, maybeEntity);
+                    removeGlowColorPacket(player, maybeEntity, entry.getValue());
                 }
             }
         }
@@ -1001,9 +975,15 @@ public class DeathEventHandler {
                 if (ownerPlayer != null) {
                     ownerTeam = ownerPlayer.getTeam() instanceof PlayerTeam pt ? pt : null;
                 } else {
-                    // 玩家离线，从记分板查找
-                    Scoreboard scoreboard = level.getScoreboard();
-                    ownerTeam = scoreboard.getPlayersTeam(ownerId.toString());
+                    // 玩家离线，通过 ProfileCache 获取玩家名再查记分板队伍
+                    var profileCache = level.getServer().getProfileCache();
+                    if (profileCache != null) {
+                        var profileOpt = profileCache.get(ownerId);
+                        if (profileOpt.isPresent()) {
+                            Scoreboard scoreboard = level.getScoreboard();
+                            ownerTeam = scoreboard.getPlayersTeam(profileOpt.get().getName());
+                        }
+                    }
                 }
                 if (ownerTeam == null && viewerTeam == null && Config.COMMON.NO_TEAM_IS_VALID_TEAM.get()) {
                     // 双方都无队伍，且 noTeamIsValidTeam 为 true
@@ -1037,13 +1017,12 @@ public class DeathEventHandler {
     }
 
     /**
-     * 向玩家发送移除实体发光颜色队伍关联的数据包。
+     * 向玩家发送移除实体发光颜色队伍关联的数据包（仅从指定颜色队伍移除）。
      */
-    private static void removeGlowColorPacket(ServerPlayer viewer, Entity target) {
-        // 从所有颜色队伍中移除
-        for (PlayerTeam team : GLOW_COLOR_TEAMS.values()) {
-            viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, target.getStringUUID(), ClientboundSetPlayerTeamPacket.Action.REMOVE));
-        }
+    private static void removeGlowColorPacket(ServerPlayer viewer, Entity target, ChatFormatting color) {
+        PlayerTeam team = GLOW_COLOR_TEAMS.get(color);
+        if (team == null) return;
+        viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, target.getStringUUID(), ClientboundSetPlayerTeamPacket.Action.REMOVE));
     }
 
     /** 清除指定玩家的所有私有高亮（关闭功能或玩家登出时调用）。 */
@@ -1058,11 +1037,11 @@ public class DeathEventHandler {
             return;
         }
 
-        for (Integer entityId : previous.keySet()) {
-            Entity maybeEntity = serverLevel.getEntity(entityId);
+        for (var entry : previous.entrySet()) {
+            Entity maybeEntity = serverLevel.getEntity(entry.getKey());
             if (maybeEntity != null && maybeEntity.isAlive()) {
                 sendPrivateGlowPacket(player, maybeEntity, false);
-                removeGlowColorPacket(player, maybeEntity);
+                removeGlowColorPacket(player, maybeEntity, entry.getValue());
             }
         }
     }

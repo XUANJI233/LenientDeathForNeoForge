@@ -20,8 +20,13 @@
 | `enabled` | `true` \| `false` | `true` | 死亡保留物品总开关。关闭后所有保留规则均不生效。 |
 | `byItemTypeEnabled` | `true` \| `false` | `true` | 按物品类型（护甲、工具、武器等）分类保留的总开关。 |
 | `deathCoordinates` | `true` \| `false` | `true` | 重生后在聊天栏显示死亡坐标（含维度信息）。 |
-| `itemGlow` | `true` \| `false` | `true` | 私有高亮：仅物品归属玩家能看到掉落物发光，其他玩家不可见。 |
-| `itemResilience` | `true` \| `false` | `true` | 使死亡掉落物免疫火焰和爆炸伤害，减少意外销毁。 |
+| `itemGlow` | `true` \| `false` | `true` | 私有高亮：物品归属玩家能看到掉落物发光（颜色根据剩余寿命动态变化）。 |
+| `glowVisibility` | 枚举 | `DEAD_PLAYER_AND_TEAM` | 谁可以看到发光：`DEAD_PLAYER`=仅死亡玩家，`DEAD_PLAYER_AND_TEAM`=死亡玩家+同队伍，`EVERYONE`=所有玩家。 |
+| `noTeamIsValidTeam` | `true` \| `false` | `false` | 当 glowVisibility 为 DEAD_PLAYER_AND_TEAM 时：若死亡玩家无队伍，是否对所有无队伍玩家显示高亮。 |
+| `itemResilience` | `true` \| `false` | `false` | 使死亡掉落物免疫所有伤害（火焰、仙人掌、爆炸等）。 |
+| `extendedLifetimeEnabled` | `true` \| `false` | `false` | 是否修改死亡掉落物的存在时间。 |
+| `deathDropItemLifetimeSeconds` | 整数 `0`-`1800` | `900` | 死亡掉落物存在时间（秒），neverDespawn 为 true 时忽略。300=5分钟，900=15分钟。 |
+| `deathDropItemsNeverDespawn` | `true` \| `false` | `false` | 死亡掉落物永不消失。清理命令：`/kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]` |
 | `voidRecovery` | `true` \| `false` | `true` | 虚空恢复：掉落物落入虚空时自动传送到安全位置。 |
 | `hazardRecovery` | `true` \| `false` | `true` | 火焰/岩浆恢复：掉落物着火或在岩浆中时自动传送到安全位置。 |
 | `voidRecoveryDebug` | `true` \| `false` | `false` | 虚空恢复调试日志。**仅运行时有效，不保存到配置文件，重新加载世界后自动重置为 `false`。** |
@@ -105,7 +110,7 @@
 
 1. 若配置文件不存在，先运行一次客户端或服务端以自动生成默认配置。
 2. 打开 `<世界存档>/serverconfig/lenientdeath-server.toml`。
-3. 按需修改 `[General]`、`[Randomizer]`、`[NBT]`、`[Features]`、`[Lists]`、`[ItemTypes]` 下的配置项。
+3. 按需修改 `[General]`、`[Randomizer]`、`[NBT]`、`[Features]`、`[Features.DroppedItemGlow]`、`[Features.ExtendedDeathItemLifetime]`、`[Lists]`、`[ItemTypes]` 下的配置项。
 4. 保存并重启游戏/服务器，或在游戏中执行 `/lenientdeath config reload`。
 
 ### 旧版配置迁移
@@ -148,8 +153,25 @@ privateHighlightScanIntervalTicks = 10
 privateHighlightScanRadius = 96.0
 # 每次扫描最多处理的掉落物实体数（范围 16-4096）
 privateHighlightMaxScannedEntities = 256
-# 让死亡掉落物免疫火焰和爆炸伤害
-itemResilience = true
+
+[Features.DroppedItemGlow]
+# 发光可见性：DEAD_PLAYER / DEAD_PLAYER_AND_TEAM / EVERYONE
+glowVisibility = "DEAD_PLAYER_AND_TEAM"
+# 当死亡玩家无队伍时，是否对所有无队伍玩家显示高亮
+noTeamIsValidTeam = false
+
+# 使死亡掉落物免疫所有伤害
+itemResilience = false
+
+[Features.ExtendedDeathItemLifetime]
+# 是否修改死亡掉落物的存在时间
+enabled = false
+# 掉落物存在时间（秒），neverDespawn 为 true 时忽略
+# 300 = 5 分钟（原版），900 = 15 分钟，1800 = 30 分钟
+deathDropItemLifetimeSeconds = 900
+# 永不消失，清理命令: /kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]
+deathDropItemsNeverDespawn = false
+
 # 虚空恢复：当掉落物落入虚空时传送到安全位置
 voidRecovery = true
 # 火焰/岩浆恢复：当掉落物着火或在岩浆中时传送到安全位置
@@ -225,8 +247,9 @@ curios = "PRESERVE"
 
 ### 其他功能
 
-- **私有高亮**（`itemGlow`）：死亡掉落物仅对归属玩家显示发光效果，其他玩家不可见。
-- **掉落物韧性**（`itemResilience`）：死亡掉落物免疫火焰和爆炸伤害。
+- **私有高亮**（`itemGlow`）：死亡掉落物仅对归属玩家（或同队伍/所有人，可通过 `glowVisibility` 配置）显示发光效果。发光颜色根据剩余寿命动态变化：蓝色（>5分钟）→ 绿色（3-5分钟）→ 黄色（2-3分钟）→ 橙色（1-2分钟）→ 红色（30秒-1分钟）→ 闪烁红（<30秒）。
+- **掉落物韧性**（`itemResilience`）：使死亡掉落物免疫所有伤害（火焰、仙人掌、爆炸等）。
+- **延长寿命**（`extendedLifetimeEnabled`）：延长死亡掉落物的存在时间（超过原版 5 分钟），或设为永不消失。
 - **死亡坐标**（`deathCoordinates`）：重生后在聊天栏显示死亡位置及维度。
 - **原槽位还原**（`restoreSlots`）：保留的物品自动放回死亡前所在的背包槽位。
 

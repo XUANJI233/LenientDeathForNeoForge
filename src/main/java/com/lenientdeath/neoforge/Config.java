@@ -76,11 +76,8 @@ public class Config {
         public final ModConfigSpec.EnumValue<GlowVisibility> GLOW_VISIBILITY;
         public final ModConfigSpec.BooleanValue NO_TEAM_IS_VALID_TEAM;
 
-        // --- 物品韧性（分项） ---
+        // --- 物品韧性 ---
         public final ModConfigSpec.BooleanValue ITEM_RESILIENCE_ENABLED;
-        public final ModConfigSpec.BooleanValue DEATH_ITEMS_FIRE_PROOF;
-        public final ModConfigSpec.BooleanValue DEATH_ITEMS_CACTUS_PROOF;
-        public final ModConfigSpec.BooleanValue DEATH_ITEMS_EXPLOSION_PROOF;
 
         // --- 延长死亡物品寿命 ---
         public final ModConfigSpec.BooleanValue EXTENDED_LIFETIME_ENABLED;
@@ -212,29 +209,17 @@ public class Config {
                     "Only applies if glowVisibility is DEAD_PLAYER_AND_TEAM.\n"
                     + "If the dead player isn't on a team, show outline to everyone without a team?\n"
                     + "Otherwise only shown to the dead player.\n"
-                    + "当死亡玩家没有队伍时，是否对所有无队伍玩家显示高亮？").define("noTeamIsValidTeam", true);
+                    + "当死亡玩家没有队伍时，是否对所有无队伍玩家显示高亮？").define("noTeamIsValidTeam", false);
             builder.pop();
 
             ITEM_RESILIENCE_ENABLED = builder.comment(
-                    "Master switch: make death-dropped items invulnerable to all damage\n"
-                    + "总开关：让死亡掉落物免疫所有伤害（开启时覆盖下方分项设置）").define("itemResilience", true);
-
-            builder.push("ItemResilience");
-            DEATH_ITEMS_FIRE_PROOF = builder.comment(
-                    "Death drop items are immune to fire (only checked when master switch is off)\n"
-                    + "死亡掉落物免疫火焰（仅在总开关关闭时生效）").define("allDeathItemsAreFireProof", false);
-            DEATH_ITEMS_CACTUS_PROOF = builder.comment(
-                    "Death drop items are immune to cactus (only checked when master switch is off)\n"
-                    + "死亡掉落物免疫仙人掌（仅在总开关关闭时生效）").define("allDeathItemsAreCactusProof", false);
-            DEATH_ITEMS_EXPLOSION_PROOF = builder.comment(
-                    "Death drop items are immune to explosions (only checked when master switch is off)\n"
-                    + "死亡掉落物免疫爆炸（仅在总开关关闭时生效）").define("allDeathItemsAreExplosionProof", false);
-            builder.pop();
+                    "Make death-dropped items invulnerable to all damage (fire, cactus, explosion, etc.)\n"
+                    + "使死亡掉落物免疫所有伤害（火焰、仙人掌、爆炸等）").define("itemResilience", false);
 
             builder.push("ExtendedDeathItemLifetime");
             EXTENDED_LIFETIME_ENABLED = builder.comment(
                     "Whether death drop's lifetime should be modified by LenientDeath\n"
-                    + "是否修改死亡掉落物的存在时间").define("enabled", true);
+                    + "是否修改死亡掉落物的存在时间").define("enabled", false);
             DEATH_DROP_ITEM_LIFETIME_SECONDS = builder.comment(
                     "How long death drop items should last in seconds (ignored if neverDespawn is true)\n"
                     + "死亡掉落物的存在时间（秒），neverDespawn 为 true 时忽略\n"
@@ -242,7 +227,7 @@ public class Config {
             DEATH_DROP_ITEMS_NEVER_DESPAWN = builder.comment(
                     "If true, death drop items will never despawn\n"
                     + "为 true 时死亡掉落物永不消失\n"
-                    + "清理命令: /kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]").define("deathDropItemsNeverDespawn", true);
+                    + "清理命令: /kill @e[type=item,tag=LENIENT_DEATH_INFINITE_LIFETIME]").define("deathDropItemsNeverDespawn", false);
             builder.pop();
 
             VOID_RECOVERY_ENABLED = builder.comment(

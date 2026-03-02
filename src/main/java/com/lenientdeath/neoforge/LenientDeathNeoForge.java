@@ -60,11 +60,16 @@ public class LenientDeathNeoForge {
 
     /**
      * 数据包重载（/reload）后标签内容可能变化，刷新物品列表缓存。
+     * <p>
      * shouldUpdateStaticData() 确保仅在服务端逻辑线程执行，
      * 避免单人游戏中客户端线程并发修改共享集合。
+     * <p>
+     * Config.SPEC.isLoaded() 守卫：创建新世界时 TagsUpdatedEvent 在
+     * WorldLoader.load 阶段触发，此时 SERVER 配置尚未绑定，
+     * 直接读取 ConfigValue 会导致 checkState 崩溃。
      */
     private void onTagsUpdated(final TagsUpdatedEvent event) {
-        if (event.shouldUpdateStaticData()) {
+        if (event.shouldUpdateStaticData() && Config.SPEC.isLoaded()) {
             ManualAllowAndBlocklist.INSTANCE.refreshItems();
         }
     }

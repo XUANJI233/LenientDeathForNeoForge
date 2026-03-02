@@ -39,8 +39,16 @@ public class ManualAllowAndBlocklist {
 
     /**
      * Load items from the current tag set and config.
+     * <p>
+     * 防御性守卫：当 SERVER 配置尚未绑定时（如创建新世界阶段），
+     * 跳过刷新以避免 {@code ConfigValue.get()} 触发 {@code checkState} 崩溃。
      */
     public void refreshItems() {
+        if (!Config.SPEC.isLoaded()) {
+            LOGGER.debug("Config not yet loaded, skipping refreshItems()");
+            return;
+        }
+
         this.alwaysPreserved.clear();
         this.alwaysDroppedItems.clear();
 

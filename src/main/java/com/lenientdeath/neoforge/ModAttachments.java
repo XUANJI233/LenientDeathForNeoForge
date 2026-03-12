@@ -1,14 +1,19 @@
 package com.lenientdeath.neoforge;
 
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.core.UUIDUtil;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.attachment.AttachmentType;
 import net.neoforged.neoforge.registries.DeferredRegister;
 import net.neoforged.neoforge.registries.NeoForgeRegistries;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -82,6 +87,40 @@ public final class ModAttachments {
     public static final Supplier<AttachmentType<Integer>> VOID_RECOVERED = ATTACHMENT_TYPES.register(
             "void_recovered",
             () -> AttachmentType.builder(() -> -1).serialize(com.mojang.serialization.Codec.INT).build()
+    );
+
+    // ── 玩家级持久化附件（保留物品 & 死亡坐标，用于在死亡屏幕退出/关服后恢复） ──
+
+    /**
+     * 可序列化的保留物品条目：物品堆叠 + 原始槽位。
+     * <p>
+     * 持久化到玩家 NBT，使保留物品数据在服务器重启或死亡屏幕断连后仍可恢复。
+     */
+    public record SavedItemEntry(ItemStack stack, int slot) {
+        public static final Codec<SavedItemEntry> CODEC = RecordCodecBuilder.create(instance ->
+            instance.group(
+                ItemStack.CODEC.fieldOf("stack").forGetter(SavedItemEntry::stack),
+                Codec.INT.fieldOf("slot").forGetter(SavedItemEntry::slot)
+            ).apply(instance, SavedItemEntry::new)
+        );
+    }
+
+    /** 玩家死亡时保留的物品列表，持久化到玩家 NBT 以在重启/断连后恢复。 */
+    @SuppressWarnings("unused")
+    public static final Supplier<AttachmentType<List<SavedItemEntry>>> SAVED_ITEMS_DATA = ATTACHMENT_TYPES.register(
+            "saved_items_data",
+            () -> AttachmentType.<List<SavedItemEntry>>builder(Collections::emptyList)
+                    .serialize(SavedItemEntry.CODEC.listOf())
+                    .build()
+    );
+
+    /** 玩家死亡坐标，持久化到玩家 NBT 以在重启/断连后发送死亡坐标消息。 */
+    @SuppressWarnings("unused")
+    public static final Supplier<AttachmentType<GlobalPos>> PLAYER_DEATH_POS = ATTACHMENT_TYPES.register(
+            "player_death_pos",
+            () -> AttachmentType.builder(() -> GlobalPos.of(Level.OVERWORLD, BlockPos.ZERO))
+                    .serialize(GlobalPos.CODEC)
+                    .build()
     );
 
     /**

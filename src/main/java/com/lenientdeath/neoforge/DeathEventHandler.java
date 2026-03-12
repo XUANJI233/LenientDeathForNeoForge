@@ -275,7 +275,10 @@ public class DeathEventHandler {
         // 死亡坐标提示（在 Clone 事件给新玩家实例发送，避免死亡瞬间消息丢失）
         if (Config.COMMON.DEATH_COORDS_ENABLED.get()) {
             var lvl = player.level();
-            PENDING_DEATH_POS.put(player.getUUID(), GlobalPos.of(lvl.dimension(), player.blockPosition()));
+            GlobalPos deathGlobalPos = GlobalPos.of(lvl.dimension(), player.blockPosition());
+            PENDING_DEATH_POS.put(player.getUUID(), deathGlobalPos);
+            // 持久化到玩家附件，在死亡屏幕退出/关服后仍可恢复
+            ModEntityData.put(player, ModAttachments.PLAYER_DEATH_POS, deathGlobalPos);
         }
 
         // 背包快照 (用于恢复槽位)
@@ -410,6 +413,12 @@ public class DeathEventHandler {
         // 保存保留的物品
         if (!keptItems.isEmpty()) {
             SAVED_ITEMS.put(player.getUUID(), keptItems);
+            // 持久化到玩家附件，在死亡屏幕退出/关服后仍可恢复
+            List<ModAttachments.SavedItemEntry> entries = new ArrayList<>(keptItems.size());
+            for (SavedItem s : keptItems) {
+                entries.add(new ModAttachments.SavedItemEntry(s.stack().copy(), s.originalSlot()));
+            }
+            ModEntityData.put(player, ModAttachments.SAVED_ITEMS_DATA, entries);
         }
     }
 
@@ -811,6 +820,8 @@ public class DeathEventHandler {
 
     /**
      * 玩家重生时：发送死亡坐标、还原保留物品、继承安全位置。
+     * <p>
+     * 内存 Map 优先（正常重生路径），Attachment 回退（死亡屏幕退出/关服后重连）。
      */
     @SubscribeEvent
     public static void onPlayerClone(PlayerEvent.Clone event) {
@@ -823,8 +834,12 @@ public class DeathEventHandler {
         PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
         GLOW_TEAMS_INITIALIZED.remove(uuid);
 
-        // 仅给死亡玩家自己发送死亡坐标消息（重生后发送更稳定）
+        // ── 死亡坐标消息 ─────────────────────────────────────
+        // 优先从内存 Map 读取（正常重生），回退到 Attachment（死亡屏幕断连后重连）
         GlobalPos deathPos = PENDING_DEATH_POS.remove(uuid);
+        if (deathPos == null && ModEntityData.has(event.getOriginal(), ModAttachments.PLAYER_DEATH_POS)) {
+            deathPos = ModEntityData.get(event.getOriginal(), ModAttachments.PLAYER_DEATH_POS);
+        }
         if (deathPos != null && Config.COMMON.DEATH_COORDS_ENABLED.get()) {
             newPlayer.sendSystemMessage(Component.translatable(
                 "lenientdeath.death_message",
@@ -835,8 +850,18 @@ public class DeathEventHandler {
             ).withStyle(ChatFormatting.YELLOW));
         }
 
-        // 恢复保留物品（remove 同时获取，避免重复查找）
+        // ── 恢复保留物品 ─────────────────────────────────────
+        // 优先从内存 Map 读取（正常重生），回退到 Attachment（死亡屏幕断连后重连）
         List<SavedItem> items = SAVED_ITEMS.remove(uuid);
+        if (items == null && ModEntityData.has(event.getOriginal(), ModAttachments.SAVED_ITEMS_DATA)) {
+            List<ModAttachments.SavedItemEntry> persisted = ModEntityData.get(event.getOriginal(), ModAttachments.SAVED_ITEMS_DATA);
+            if (persisted != null && !persisted.isEmpty()) {
+                items = new ArrayList<>(persisted.size());
+                for (ModAttachments.SavedItemEntry entry : persisted) {
+                    items.add(new SavedItem(entry.stack(), entry.slot()));
+                }
+            }
+        }
         if (items != null) {
             boolean restoreToSlot = Config.COMMON.RESTORE_SLOTS_ENABLED.get();
 

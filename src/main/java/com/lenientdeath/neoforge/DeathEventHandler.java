@@ -15,6 +15,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -36,6 +37,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -64,8 +66,8 @@ public class DeathEventHandler {
     /** 恢复目标：安全传送的目标坐标及来源策略名称（用于调试日志）。 */
     private record RecoveryTarget(BlockPos pos, String source) {}
 
-    /** 同 tick 的恢复目标缓存键，避免同位置掉落物重复执行 3D 安全点搜索。 */
-    private record RecoveryTargetCacheKey(ResourceKey<Level> dimension, BlockPos itemPos, UUID ownerId, GlobalPos safePos) {}
+    /** 同 tick 的恢复目标缓存键，使用分桶坐标提升附近掉落物共享命中。 */
+    private record RecoveryTargetCacheKey(ResourceKey<Level> dimension, int bucketX, int bucketY, int bucketZ, UUID ownerId, GlobalPos safePos) {}
 
     /** 恢复目标缓存值。 */
     private record RecoveryTargetCacheValue(long gameTime, RecoveryTarget target) {}
@@ -109,6 +111,12 @@ public class DeathEventHandler {
     private static final double IMMEDIATE_VOID_RECOVERY_Y_MARGIN = 8.0;
     /** 单次安全点搜索最多检查的候选方块数，避免极端场景压垮主线程。 */
     private static final int MAX_SAFE_SPOT_CHECKS_PER_SEARCH = 12000;
+    /** 同一 tick 内允许执行的昂贵三维搜索次数上限。 */
+    private static final int MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK = 6;
+    /** 恢复目标缓存最大条目数（LRU 自动淘汰）。 */
+    private static final int MAX_RECOVERY_TARGET_CACHE_ENTRIES = 4096;
+    /** 恢复目标缓存坐标分桶粒度（方块）。 */
+    private static final int RECOVERY_CACHE_POSITION_GRANULARITY = 4;
     /** Entity shared flags 同步数据的 slot ID（固定为 0）。 */
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     /** Entity shared flags 中发光位的掩码。 */
@@ -163,8 +171,18 @@ public class DeathEventHandler {
     private static final Map<UUID, String> OWNER_SCOREBOARD_NAMES = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
     private static final Set<UUID> GLOW_TEAMS_INITIALIZED = ConcurrentHashMap.newKeySet();
-    /** 同 tick 恢复目标缓存（仅用于削峰，超出上限时整体清理）。 */
-    private static final Map<RecoveryTargetCacheKey, RecoveryTargetCacheValue> RECOVERY_TARGET_CACHE = new ConcurrentHashMap<>();
+    /** 恢复目标 LRU 缓存，自动淘汰最久未使用条目。 */
+    private static final Map<RecoveryTargetCacheKey, RecoveryTargetCacheValue> RECOVERY_TARGET_CACHE =
+            Collections.synchronizedMap(new LinkedHashMap<>(128, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<RecoveryTargetCacheKey, RecoveryTargetCacheValue> eldest) {
+                    return size() > MAX_RECOVERY_TARGET_CACHE_ENTRIES;
+                }
+            });
+    /** 当前统计窗口的游戏时间（用于按 tick 重置昂贵搜索计数）。 */
+    private static volatile long recoverySearchBudgetTick = Long.MIN_VALUE;
+    /** 当前 tick 已执行的昂贵搜索次数。 */
+    private static volatile int expensiveRecoverySearchesThisTick = 0;
 
     @SuppressWarnings("unchecked")
     private static EntityDataAccessor<Byte> resolveSharedFlagsAccessor() {
@@ -359,6 +377,13 @@ public class DeathEventHandler {
 
         // 获取快照
         Map<Integer, ItemStack> snapshot = INVENTORY_SNAPSHOTS.remove(player.getUUID());
+        Map<Item, Deque<Map.Entry<Integer, ItemStack>>> snapshotBuckets = null;
+        if (Config.COMMON.RESTORE_SLOTS_ENABLED.get() && snapshot != null && !snapshot.isEmpty()) {
+            snapshotBuckets = new HashMap<>();
+            for (var entry : snapshot.entrySet()) {
+                snapshotBuckets.computeIfAbsent(entry.getValue().getItem(), ignored -> new ArrayDeque<>()).addLast(entry);
+            }
+        }
         captureDeathDropSnapshot(player, snapshot, drops);
         // 获取玩家历史安全点中的最佳候选（优先同维度且接近死亡点）
         GlobalPos lastSafePos = getBestHistoricalSafePos(player.getUUID(), player.level().dimension(), player.blockPosition());
@@ -381,16 +406,21 @@ public class DeathEventHandler {
             ItemStack stack = entity.getItem();
             int matchedSlot = -1;
 
-            if (Config.COMMON.RESTORE_SLOTS_ENABLED.get() && snapshot != null) {
-                // 使用普通 for 循环替代 stream，避免在死亡掉落循环中产生额外分配
-                Iterator<Map.Entry<Integer, ItemStack>> snapshotIterator = snapshot.entrySet().iterator();
-                while (snapshotIterator.hasNext()) {
-                    var entry = snapshotIterator.next();
-                    if (ItemStack.isSameItemSameComponents(entry.getValue(), stack)) {
-                        matchedSlot = entry.getKey();
-                        snapshotIterator.remove();
-                        ModEntityData.put(entity, ModAttachments.ORIGINAL_SLOT, matchedSlot);
-                        break;
+            if (snapshotBuckets != null) {
+                Deque<Map.Entry<Integer, ItemStack>> candidateSlots = snapshotBuckets.get(stack.getItem());
+                if (candidateSlots != null && !candidateSlots.isEmpty()) {
+                    Iterator<Map.Entry<Integer, ItemStack>> candidateIt = candidateSlots.iterator();
+                    while (candidateIt.hasNext()) {
+                        var entry = candidateIt.next();
+                        if (ItemStack.isSameItemSameComponents(entry.getValue(), stack)) {
+                            matchedSlot = entry.getKey();
+                            candidateIt.remove();
+                            if (candidateSlots.isEmpty()) {
+                                snapshotBuckets.remove(stack.getItem());
+                            }
+                            ModEntityData.put(entity, ModAttachments.ORIGINAL_SLOT, matchedSlot);
+                            break;
+                        }
                     }
                 }
             }
@@ -444,7 +474,7 @@ public class DeathEventHandler {
 
             if (immediateVoidRecovery && serverLevel != null) {
                 if (cachedImmediateRecoveryPos == null) {
-                    RecoveryTarget rt = resolveRecoveryTarget(serverLevel, entity);
+                    RecoveryTarget rt = resolveRecoveryTarget(serverLevel, entity, true);
                     cachedImmediateRecoveryPos = rt.pos();
                     cachedImmediateRecoverySource = rt.source();
                 }
@@ -474,6 +504,19 @@ public class DeathEventHandler {
                 entries.add(new ModAttachments.SavedItemEntry(s.stack().copy(), s.originalSlot()));
             }
             ModEntityData.put(player, ModAttachments.SAVED_ITEMS_DATA, entries);
+        }
+    }
+
+    /**
+     * 掉落事件被其它模组取消时，仍需清理死亡瞬间记录的背包快照，避免残留占用内存。
+     */
+    @SubscribeEvent(receiveCanceled = true)
+    public static void onPlayerDropsCanceledCleanup(LivingDropsEvent event) {
+        if (!event.isCanceled()) {
+            return;
+        }
+        if (event.getEntity() instanceof ServerPlayer player) {
+            INVENTORY_SNAPSHOTS.remove(player.getUUID());
         }
     }
 
@@ -586,7 +629,7 @@ public class DeathEventHandler {
      *   <li>出生点附近 / 出生点回退</li>
      * </ol>
      */
-    private static RecoveryTarget resolveRecoveryTarget(ServerLevel level, ItemEntity item) {
+    private static RecoveryTarget resolveRecoveryTarget(ServerLevel level, ItemEntity item, boolean allowExpensiveSearch) {
         BlockPos itemPos = item.blockPosition();
 
         // 策略1（最高优先级）：玩家历史安全点
@@ -612,17 +655,24 @@ public class DeathEventHandler {
             }
         }
 
-        // 策略3：真正“最近”的安全位置（按三维距离）
-        BlockPos nearest = findNearestSafeSpot(level, item, itemPos, 16, 20);
-        if (nearest != null) {
-            return new RecoveryTarget(nearest, "nearest_3d");
+        if (allowExpensiveSearch) {
+            // 策略3：真正“最近”的安全位置（按三维距离）
+            BlockPos nearest = findNearestSafeSpot(level, item, itemPos, 16, 20);
+            if (nearest != null) {
+                return new RecoveryTarget(nearest, "nearest_3d");
+            }
+
+            // 策略4：出生点附近
+            BlockPos spawnPos = level.getSharedSpawnPos();
+            BlockPos spawnNearest = findNearestSafeSpot(level, item, spawnPos, 8, 20);
+            if (spawnNearest != null) {
+                return new RecoveryTarget(spawnNearest, "spawn_nearest");
+            }
         }
 
-        // 策略4：出生点附近
         BlockPos spawnPos = level.getSharedSpawnPos();
-        BlockPos spawnNearest = findNearestSafeSpot(level, item, spawnPos, 8, 20);
-        if (spawnNearest != null) {
-            return new RecoveryTarget(spawnNearest, "spawn_nearest");
+        if (!allowExpensiveSearch) {
+            return new RecoveryTarget(new BlockPos(spawnPos.getX(), Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel()), spawnPos.getZ()), "search_budget_fallback");
         }
 
         int fallbackY = Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel());
@@ -640,9 +690,16 @@ public class DeathEventHandler {
                 ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
                 : null;
 
+        BlockPos itemPos = item.blockPosition();
+        int bucketX = Math.floorDiv(itemPos.getX(), RECOVERY_CACHE_POSITION_GRANULARITY);
+        int bucketY = Math.floorDiv(itemPos.getY(), RECOVERY_CACHE_POSITION_GRANULARITY);
+        int bucketZ = Math.floorDiv(itemPos.getZ(), RECOVERY_CACHE_POSITION_GRANULARITY);
+
         RecoveryTargetCacheKey key = new RecoveryTargetCacheKey(
                 level.dimension(),
-                item.blockPosition().immutable(),
+            bucketX,
+            bucketY,
+            bucketZ,
                 ownerId,
                 safePos
         );
@@ -653,12 +710,17 @@ public class DeathEventHandler {
             return cached.target;
         }
 
-        RecoveryTarget resolved = resolveRecoveryTarget(level, item);
-        RECOVERY_TARGET_CACHE.put(key, new RecoveryTargetCacheValue(gameTime, resolved));
-
-        if (RECOVERY_TARGET_CACHE.size() > 4096) {
-            RECOVERY_TARGET_CACHE.clear();
+        if (recoverySearchBudgetTick != gameTime) {
+            recoverySearchBudgetTick = gameTime;
+            expensiveRecoverySearchesThisTick = 0;
         }
+        boolean allowExpensiveSearch = expensiveRecoverySearchesThisTick < MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK;
+        if (allowExpensiveSearch) {
+            expensiveRecoverySearchesThisTick++;
+        }
+
+        RecoveryTarget resolved = resolveRecoveryTarget(level, item, allowExpensiveSearch);
+        RECOVERY_TARGET_CACHE.put(key, new RecoveryTargetCacheValue(gameTime, resolved));
 
         return resolved;
     }
@@ -1033,7 +1095,11 @@ public class DeathEventHandler {
         SAFE_POS_HISTORY.remove(uuid);
         PENDING_DEATH_POS.remove(uuid);
         PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
+        DEATH_DROP_SNAPSHOTS.remove(uuid);
+        NEXT_DEATH_DROP_SNAPSHOT_ID.remove(uuid);
+        PENDING_SNAPSHOT_RESTORES.remove(uuid);
         OWNED_DEATH_DROP_IDS.remove(uuid);
+        OWNER_SCOREBOARD_NAMES.remove(uuid);
         GLOW_TEAMS_INITIALIZED.remove(uuid);
     }
 
@@ -1097,6 +1163,8 @@ public class DeathEventHandler {
         OWNER_SCOREBOARD_NAMES.clear();
         GLOW_TEAMS_INITIALIZED.clear();
         RECOVERY_TARGET_CACHE.clear();
+        recoverySearchBudgetTick = Long.MIN_VALUE;
+        expensiveRecoverySearchesThisTick = 0;
     }
 
     private static void captureDeathDropSnapshot(ServerPlayer player,
@@ -1344,6 +1412,7 @@ public class DeathEventHandler {
             trackedEntityIds.removeAll(staleTrackedIds);
             if (trackedEntityIds.isEmpty()) {
                 OWNED_DEATH_DROP_IDS.remove(playerId);
+                OWNER_SCOREBOARD_NAMES.remove(playerId);
             }
         }
 

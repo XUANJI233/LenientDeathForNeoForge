@@ -153,6 +153,8 @@ public class DeathEventHandler {
     private static final Map<UUID, Deque<DeathDropSnapshot>> DEATH_DROP_SNAPSHOTS = new ConcurrentHashMap<>();
     /** 每个玩家的自增快照 ID。 */
     private static final Map<UUID, Integer> NEXT_DEATH_DROP_SNAPSHOT_ID = new ConcurrentHashMap<>();
+    /** 离线计划恢复队列（玩家 UUID -> 待恢复的快照 ID 列表）。 */
+    private static final Map<UUID, Deque<Integer>> PENDING_SNAPSHOT_RESTORES = new ConcurrentHashMap<>();
     /** 每个玩家拥有的死亡掉落实体 ID，用于私有高亮增量扫描，避免全世界实体查询。 */
     private static final Map<UUID, Set<Integer>> OWNED_DEATH_DROP_IDS = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
@@ -990,6 +992,45 @@ public class DeathEventHandler {
     }
 
     /**
+     * 玩家登录时处理离线计划恢复队列。
+     */
+    @SubscribeEvent
+    public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        Deque<Integer> queued = PENDING_SNAPSHOT_RESTORES.remove(player.getUUID());
+        if (queued == null || queued.isEmpty()) {
+            return;
+        }
+
+        int success = 0;
+        int failed = 0;
+        for (Integer snapshotId : queued) {
+            int restored = restoreDeathDropSnapshot(player, snapshotId);
+            if (restored >= 0) {
+                success++;
+            } else {
+                failed++;
+            }
+        }
+
+        if (success > 0) {
+            player.sendSystemMessage(Component.translatable(
+                    "lenientdeath.command.snapshot.restore.scheduled.executed",
+                    success
+            ).withStyle(ChatFormatting.GREEN));
+        }
+        if (failed > 0) {
+            player.sendSystemMessage(Component.translatable(
+                    "lenientdeath.command.snapshot.restore.scheduled.failed",
+                    failed
+            ).withStyle(ChatFormatting.RED));
+        }
+    }
+
+    /**
      * 服务器停止时清理全部运行时状态。
      * <p>
      * 主要用于单机环境下切换世界，避免静态缓存跨世界残留。
@@ -1003,6 +1044,7 @@ public class DeathEventHandler {
         PRIVATE_HIGHLIGHT_COLORS.clear();
         DEATH_DROP_SNAPSHOTS.clear();
         NEXT_DEATH_DROP_SNAPSHOT_ID.clear();
+        PENDING_SNAPSHOT_RESTORES.clear();
         OWNED_DEATH_DROP_IDS.clear();
         GLOW_TEAMS_INITIALIZED.clear();
         RECOVERY_TARGET_CACHE.clear();
@@ -1161,6 +1203,16 @@ public class DeathEventHandler {
         Deque<DeathDropSnapshot> removed = DEATH_DROP_SNAPSHOTS.remove(playerId);
         NEXT_DEATH_DROP_SNAPSHOT_ID.remove(playerId);
         return removed == null ? 0 : removed.size();
+    }
+
+    public static boolean scheduleDeathDropSnapshotRestore(UUID playerId, int snapshotId) {
+        if (getDeathDropSnapshot(playerId, snapshotId) == null) {
+            return false;
+        }
+        PENDING_SNAPSHOT_RESTORES
+                .computeIfAbsent(playerId, ignored -> new ArrayDeque<>())
+                .addLast(snapshotId);
+        return true;
     }
 
     /**

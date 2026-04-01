@@ -15,7 +15,6 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -26,6 +25,7 @@ import java.util.UUID;
  * 死亡快照箱子界面（6x9）：
  * 1) 玩家列表 2) 某玩家快照列表 3) 快照详情（含恢复二次确认）。
  */
+@SuppressWarnings("null") // Minecraft API 与静态分析注解不一致导致的空安全误报
 public class SnapshotChestMenu extends AbstractContainerMenu {
     private static final int CHEST_SIZE = 54;
     private static final int LIST_START_SLOT = 9;

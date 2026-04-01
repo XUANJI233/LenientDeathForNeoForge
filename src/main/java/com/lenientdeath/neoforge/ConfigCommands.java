@@ -22,7 +22,6 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -168,6 +167,13 @@ public final class ConfigCommands {
                     .then(Commands.argument("player", StringArgumentType.word())
                         .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
                             .executes(context -> confirmRestoreDeathDropSnapshot(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "player"),
+                                IntegerArgumentType.getInteger(context, "snapshotId"))))))
+                .then(Commands.literal("planRestore")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                            .executes(context -> planRestoreDeathDropSnapshot(
                                 context.getSource(),
                                 StringArgumentType.getString(context, "player"),
                                 IntegerArgumentType.getInteger(context, "snapshotId"))))))
@@ -743,10 +749,15 @@ public final class ConfigCommands {
     }
 
     private static int confirmRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
-        ServerPlayer target = source.getServer().getPlayerList().getPlayerByName(playerName);
-        if (target == null) {
-            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.restore.player_offline", playerName));
+        UUID playerId = findSnapshotPlayerIdByName(playerName);
+        if (playerId == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
             return 0;
+        }
+
+        ServerPlayer target = source.getServer().getPlayerList().getPlayer(playerId);
+        if (target == null) {
+            return planRestoreDeathDropSnapshot(source, playerName, snapshotId);
         }
 
         int restored = DeathEventHandler.restoreDeathDropSnapshot(target, snapshotId);
@@ -755,6 +766,23 @@ public final class ConfigCommands {
             return 0;
         }
         source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.restore.success", snapshotId, playerName, restored), true);
+        return 1;
+    }
+
+    private static int planRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        UUID playerId = findSnapshotPlayerIdByName(playerName);
+        if (playerId == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
+            return 0;
+        }
+
+        boolean queued = DeathEventHandler.scheduleDeathDropSnapshotRestore(playerId, snapshotId);
+        if (!queued) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.not_found", snapshotId));
+            return 0;
+        }
+
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.restore.scheduled", snapshotId, playerName), true);
         return 1;
     }
 
@@ -806,32 +834,4 @@ public final class ConfigCommands {
                         .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command))
                         .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, hover)));
     }
-
-    private static void renderInventoryLayout(CommandSourceStack source, DeathEventHandler.DeathDropSnapshotView view) {
-        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.hotbar"), false);
-        sendRow(source, view, 0, 9);
-
-        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.main"), false);
-        sendRow(source, view, 9, 18);
-        sendRow(source, view, 18, 27);
-        sendRow(source, view, 27, 36);
-
-        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.extra"), false);
-        sendRow(source, view, 36, Math.min(view.containerSize(), 41));
-    }
-
-    private static void sendRow(CommandSourceStack source, DeathEventHandler.DeathDropSnapshotView view, int startInclusive, int endExclusive) {
-        MutableComponent line = Component.empty();
-        for (int slot = startInclusive; slot < endExclusive; slot++) {
-            var stack = view.slotItems().get(slot);
-            boolean present = stack != null && !stack.isEmpty();
-            Component cell = present
-                    ? Component.translatable("lenientdeath.command.snapshot.ui.snapshot.cell.filled", slot)
-                    : Component.translatable("lenientdeath.command.snapshot.ui.snapshot.cell.empty", slot);
-            line.append(cell).append(Component.literal(" "));
-        }
-        source.sendSuccess(() -> line, false);
-    }
-
-    private record SlotItemView(int slot, Component name, int count) {}
 }

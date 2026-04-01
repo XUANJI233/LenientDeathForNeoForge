@@ -15,19 +15,49 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class EventUtils {
     private EventUtils() {}
 
-    // Cache of all methods for a class (fallback, populated once per class)
-    private static final Map<Class<?>, Method[]> methodArrayCache = new ConcurrentHashMap<>();
-    // Cache of method lookups by class + signature-key
-    private static final Map<Class<?>, Map<String, Method>> methodLookupCache = new ConcurrentHashMap<>();
-    // Cache of cancel-method candidates per class (Invoker holder)
-    private static final Map<Class<?>, CancelInvoker> cancelInvokerCache = new ConcurrentHashMap<>();
-    // Cache of chosen enum cancel value per enum class
-    private static final Map<Class<?>, Object> enumCancelValueCache = new ConcurrentHashMap<>();
-    // Cache of zero-arg method handles: class -> (name#0#null -> MethodHandle)
-    private static final Map<Class<?>, Map<String, MethodHandle>> methodHandleCache = new ConcurrentHashMap<>();
+    private static final Object NO_ENUM_CANCEL_VALUE = new Object();
+    private static final CancelInvoker NO_CANCEL_INVOKER = new CancelInvoker(null, null, null, null, false);
+
+    // ClassValue caches avoid holding strong Class<?> keys in static maps (prevents classloader leaks)
+    private static final ClassValue<Method[]> methodArrayCache = new ClassValue<>() {
+        @Override
+        protected Method[] computeValue(Class<?> type) {
+            return type.getMethods();
+        }
+    };
+
+    private static final ClassValue<Map<String, Method>> methodLookupCache = new ClassValue<>() {
+        @Override
+        protected Map<String, Method> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
+
+    private static final ClassValue<CancelInvoker> cancelInvokerCache = new ClassValue<>() {
+        @Override
+        protected CancelInvoker computeValue(Class<?> type) {
+            CancelInvoker invoker = computeCancelInvokerForClass(type);
+            return invoker != null ? invoker : NO_CANCEL_INVOKER;
+        }
+    };
+
+    private static final ClassValue<Object> enumCancelValueCache = new ClassValue<>() {
+        @Override
+        protected Object computeValue(Class<?> type) {
+            Object v = computeEnumCancelValue(type);
+            return v != null ? v : NO_ENUM_CANCEL_VALUE;
+        }
+    };
+
+    private static final ClassValue<Map<String, MethodHandle>> methodHandleCache = new ClassValue<>() {
+        @Override
+        protected Map<String, MethodHandle> computeValue(Class<?> type) {
+            return new ConcurrentHashMap<>();
+        }
+    };
 
     private static Method[] methodsFor(final Class<?> cls) {
-        return methodArrayCache.computeIfAbsent(cls, Class::getMethods);
+        return methodArrayCache.get(cls);
     }
 
     // Functional invoker taking (Object target, Object arg)
@@ -94,7 +124,7 @@ public final class EventUtils {
 
     // Find a method by name (case-insensitive with ROOT locale), required param count and optional exact param type
     private static Method findMethodByName(final Class<?> cls, final String name, final int paramCount, final Class<?> paramType) {
-        final Map<String, Method> map = methodLookupCache.computeIfAbsent(cls, k -> new ConcurrentHashMap<>());
+        final Map<String, Method> map = methodLookupCache.get(cls);
         final String key = name.toLowerCase(Locale.ROOT) + "#" + paramCount + "#" + (paramType == null ? "null" : paramType.getName());
         return map.computeIfAbsent(key, n -> {
             for (final Method m : methodsFor(cls)) {
@@ -127,7 +157,7 @@ public final class EventUtils {
             if (m != null) {
                 // Try MethodHandle fast path
                 try {
-                    final Map<String, MethodHandle> inner = methodHandleCache.computeIfAbsent(cls, k -> new ConcurrentHashMap<>());
+                    final Map<String, MethodHandle> inner = methodHandleCache.get(cls);
                     final String key = name.toLowerCase(Locale.ROOT) + "#0#null";
                     MethodHandle mh = inner.get(key);
                     if (mh == null) {
@@ -176,32 +206,30 @@ public final class EventUtils {
 
         // Fast path: cached cancel invoker
         final CancelInvoker invoker = cancelInvokerCache.get(cls);
-        if (invoker != null) {
-            // try boolean first
-            if (invoker.paramType == boolean.class || invoker.paramType == Boolean.class) {
-                return invoker.invokeWithBoolean(event);
-            }
-            // try enum
-            if (invoker.paramType != null && invoker.paramType.isEnum()) {
-                final Object enumVal = pickEnumCancelValue(invoker.paramType);
-                if (enumVal != null) return invoker.invokeWithEnum(event, enumVal);
-            }
-            // if invoker has noArg and paramType is void, attempt it
-            if (invoker.noArg) {
-                return invoker.invokeWithBoolean(event);
-            }
-        }
+        if (invoker == NO_CANCEL_INVOKER) return false;
 
+        if (invoker.paramType == boolean.class || invoker.paramType == Boolean.class) {
+            return invoker.invokeWithBoolean(event);
+        }
+        if (invoker.paramType != null && invoker.paramType.isEnum()) {
+            final Object enumVal = pickEnumCancelValue(invoker.paramType);
+            if (enumVal != null) return invoker.invokeWithEnum(event, enumVal);
+        }
+        if (invoker.noArg) {
+            return invoker.invokeWithBoolean(event);
+        }
+        return false;
+    }
+
+    private static CancelInvoker computeCancelInvokerForClass(final Class<?> cls) {
         // Candidate method names to try for boolean cancel
         final String[] booleanCandidates = new String[]{"setCanceled", "setCancelled", "cancel", "setCancel"};
         Method found = null;
-        boolean foundNoArg = false;
         for (final String cand : booleanCandidates) {
             // first try zero-arg cancel() methods
             final Method candidate0 = findMethodByName(cls, cand, 0, null);
             if (candidate0 != null) {
                 found = candidate0;
-                foundNoArg = true;
                 break;
             }
             // then try boolean/boxed
@@ -211,23 +239,17 @@ public final class EventUtils {
         }
 
         if (found != null) {
-            final CancelInvoker ci = makeInvokerForMethod(found);
-            cancelInvokerCache.put(cls, ci);
-            if (foundNoArg) return ci.invokeWithBoolean(event);
-            return ci.invokeWithBoolean(event);
+            return makeInvokerForMethod(found);
         }
 
         // Try setResult enum
         final Method m = findMethodByName(cls, "setResult", 1, null);
         if (m != null && m.getParameterTypes()[0].isEnum()) {
             try { m.setAccessible(true); } catch (final Throwable ignored) {}
-            final CancelInvoker ci = makeInvokerForMethod(m);
-            cancelInvokerCache.put(cls, ci);
-            final Object enumVal = pickEnumCancelValue(m.getParameterTypes()[0]);
-            if (enumVal != null) return ci.invokeWithEnum(event, enumVal);
+            return makeInvokerForMethod(m);
         }
 
-        return false;
+        return null;
     }
 
     // Create a CancelInvoker which tries to obtain a LambdaMetafactory-based Invoker, then MethodHandle, then Method
@@ -289,10 +311,7 @@ public final class EventUtils {
     // Choose a reasonable enum constant for cancelling: prefer a cached preferred, else compute and cache
     private static Object pickEnumCancelValue(final Class<?> enumCls) {
         final Object cached = enumCancelValueCache.get(enumCls);
-        if (cached != null) return cached;
-        final Object val = computeEnumCancelValue(enumCls);
-        if (val != null) enumCancelValueCache.put(enumCls, val);
-        return val;
+        return cached == NO_ENUM_CANCEL_VALUE ? null : cached;
     }
 
     private static Object computeEnumCancelValue(final Class<?> enumCls) {

@@ -28,6 +28,7 @@ import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
 import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
@@ -62,6 +63,39 @@ public class DeathEventHandler {
 
     /** 恢复目标：安全传送的目标坐标及来源策略名称（用于调试日志）。 */
     private record RecoveryTarget(BlockPos pos, String source) {}
+
+    /** 同 tick 的恢复目标缓存键，避免同位置掉落物重复执行 3D 安全点搜索。 */
+    private record RecoveryTargetCacheKey(ResourceKey<Level> dimension, BlockPos itemPos, UUID ownerId, GlobalPos safePos) {}
+
+    /** 恢复目标缓存值。 */
+    private record RecoveryTargetCacheValue(long gameTime, RecoveryTarget target) {}
+
+    /** 服务器内部存储的死亡掉落快照。 */
+    private record DeathDropSnapshot(int id,
+                                     String playerName,
+                                     ResourceKey<Level> dimension,
+                                     BlockPos deathPos,
+                                     long gameTime,
+                                     int containerSize,
+                                     Map<Integer, ItemStack> slotItems) {}
+
+    /** 玩家维度的快照摘要（用于 UI 第一层列表）。 */
+    public record DeathDropSnapshotPlayerSummary(UUID playerId,
+                                                 String playerName,
+                                                 int snapshotCount) {}
+
+    /** 用于命令展示的快照摘要。 */
+    public record DeathDropSnapshotSummary(int id,
+                                           String playerName,
+                                           ResourceKey<Level> dimension,
+                                           BlockPos deathPos,
+                                           int itemStacks,
+                                           long gameTime) {}
+
+    /** 用于命令查看/恢复的快照详情。 */
+    public record DeathDropSnapshotView(DeathDropSnapshotSummary summary,
+                                        int containerSize,
+                                        Map<Integer, ItemStack> slotItems) {}
 
     // ── 常量 ──────────────────────────────────────────────────────
 
@@ -115,8 +149,16 @@ public class DeathEventHandler {
     private static final Map<UUID, GlobalPos> PENDING_DEATH_POS = new ConcurrentHashMap<>();
     /** 每个玩家当前可见的私有高亮实体及其颜色（实体 ID → 队伍颜色）。 */
     private static final Map<UUID, Map<Integer, ChatFormatting>> PRIVATE_HIGHLIGHT_COLORS = new ConcurrentHashMap<>();
+    /** 每个玩家的死亡掉落快照（头部为最新）。 */
+    private static final Map<UUID, Deque<DeathDropSnapshot>> DEATH_DROP_SNAPSHOTS = new ConcurrentHashMap<>();
+    /** 每个玩家的自增快照 ID。 */
+    private static final Map<UUID, Integer> NEXT_DEATH_DROP_SNAPSHOT_ID = new ConcurrentHashMap<>();
+    /** 每个玩家拥有的死亡掉落实体 ID，用于私有高亮增量扫描，避免全世界实体查询。 */
+    private static final Map<UUID, Set<Integer>> OWNED_DEATH_DROP_IDS = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
     private static final Set<UUID> GLOW_TEAMS_INITIALIZED = ConcurrentHashMap.newKeySet();
+    /** 同 tick 恢复目标缓存（仅用于削峰，超出上限时整体清理）。 */
+    private static final Map<RecoveryTargetCacheKey, RecoveryTargetCacheValue> RECOVERY_TARGET_CACHE = new ConcurrentHashMap<>();
 
     @SuppressWarnings("unchecked")
     private static EntityDataAccessor<Byte> resolveSharedFlagsAccessor() {
@@ -232,11 +274,14 @@ public class DeathEventHandler {
      */
     @SubscribeEvent
     public static void onItemPickup(ItemEntityPickupEvent.Pre event) {
+        ItemEntity entity = event.getItemEntity();
+
+        // 物品被拾取时立即从归属索引移除，避免私有高亮持续扫描无效实体 ID
+        untrackOwnedDropEntity(entity);
+
         if (!Config.COMMON.RESTORE_SLOTS_ENABLED.get()) return;
 
         if (!(event.getPlayer() instanceof ServerPlayer player)) return;
-
-        ItemEntity entity = event.getItemEntity();
 
         if (!ModEntityData.has(entity, ModAttachments.ORIGINAL_SLOT)) return;
 
@@ -281,20 +326,18 @@ public class DeathEventHandler {
             ModEntityData.put(player, ModAttachments.PLAYER_DEATH_POS, deathGlobalPos);
         }
 
-        // 背包快照 (用于恢复槽位)
-        if (Config.COMMON.RESTORE_SLOTS_ENABLED.get()) {
-            // LinkedHashMap 保证按插入顺序（槽位升序）迭代，
-            // 避免 HashMap 无序导致相同物品多栈时槽位匹配不确定
-            Map<Integer, ItemStack> snapshot = new LinkedHashMap<>();
-            Inventory inv = player.getInventory();
-            for (int i = 0; i < inv.getContainerSize(); i++) {
-                ItemStack stack = inv.getItem(i);
-                if (!stack.isEmpty()) {
-                    snapshot.put(i, stack.copy());
-                }
+        // 背包快照（死亡时始终生成）：
+        // 1) restoreSlots 用于回填原槽位 2) death snapshot UI 需要保留真实槽位布局
+        // LinkedHashMap 保证按槽位升序迭代，避免相同物品多栈时顺序不确定
+        Map<Integer, ItemStack> snapshot = new LinkedHashMap<>();
+        Inventory inv = player.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack stack = inv.getItem(i);
+            if (!stack.isEmpty()) {
+                snapshot.put(i, stack.copy());
             }
-            INVENTORY_SNAPSHOTS.put(player.getUUID(), snapshot);
         }
+        INVENTORY_SNAPSHOTS.put(player.getUUID(), snapshot);
     }
 
     /**
@@ -310,6 +353,7 @@ public class DeathEventHandler {
 
         // 获取快照
         Map<Integer, ItemStack> snapshot = INVENTORY_SNAPSHOTS.remove(player.getUUID());
+        captureDeathDropSnapshot(player, snapshot, drops);
         // 获取玩家历史安全点中的最佳候选（优先同维度且接近死亡点）
         GlobalPos lastSafePos = getBestHistoricalSafePos(player.getUUID(), player.level().dimension(), player.blockPosition());
         if (lastSafePos == null && ModEntityData.has(player, ModAttachments.SAFE_RECOVERY_POS)) {
@@ -333,10 +377,12 @@ public class DeathEventHandler {
 
             if (Config.COMMON.RESTORE_SLOTS_ENABLED.get() && snapshot != null) {
                 // 使用普通 for 循环替代 stream，避免在死亡掉落循环中产生额外分配
-                for (var entry : snapshot.entrySet()) {
+                Iterator<Map.Entry<Integer, ItemStack>> snapshotIterator = snapshot.entrySet().iterator();
+                while (snapshotIterator.hasNext()) {
+                    var entry = snapshotIterator.next();
                     if (ItemStack.isSameItemSameComponents(entry.getValue(), stack)) {
                         matchedSlot = entry.getKey();
-                        snapshot.remove(matchedSlot);
+                        snapshotIterator.remove();
                         ModEntityData.put(entity, ModAttachments.ORIGINAL_SLOT, matchedSlot);
                         break;
                     }
@@ -344,8 +390,10 @@ public class DeathEventHandler {
             }
 
             // 标记掉落物归属，供私有高亮使用
-            ModEntityData.put(entity, ModAttachments.OWNER_UUID, player.getUUID());
+            UUID ownerId = player.getUUID();
+            ModEntityData.put(entity, ModAttachments.OWNER_UUID, ownerId);
             ModEntityData.put(entity, ModAttachments.IS_DEATH_DROP, true);
+            OWNED_DEATH_DROP_IDS.computeIfAbsent(ownerId, ignored -> ConcurrentHashMap.newKeySet()).add(entity.getId());
 
             // --- A. 物品保留 ---
             int amountToKeep = PreserveItems.howManyToPreserve(player, stack);
@@ -502,7 +550,7 @@ public class DeathEventHandler {
             double fromY = item.getY();
             double fromZ = item.getZ();
 
-            RecoveryTarget recoveryTarget = resolveRecoveryTarget(serverLevel, item);
+            RecoveryTarget recoveryTarget = resolveRecoveryTargetWithCache(serverLevel, item);
             teleportItemToSafety(item, recoveryTarget.pos());
             
             // 火焰/岩浆恢复后灭火
@@ -572,6 +620,40 @@ public class DeathEventHandler {
 
         int fallbackY = Math.max(level.getMinBuildHeight() + 1, level.getSeaLevel());
         return new RecoveryTarget(new BlockPos(spawnPos.getX(), fallbackY, spawnPos.getZ()), "spawn_fallback");
+    }
+
+    /**
+     * 带同 tick 缓存的恢复目标解析：同位置、同归属/安全点的物品共享搜索结果。
+     */
+    private static RecoveryTarget resolveRecoveryTargetWithCache(ServerLevel level, ItemEntity item) {
+        UUID ownerId = ModEntityData.has(item, ModAttachments.OWNER_UUID)
+                ? ModEntityData.get(item, ModAttachments.OWNER_UUID)
+                : null;
+        GlobalPos safePos = ModEntityData.has(item, ModAttachments.SAFE_RECOVERY_POS)
+                ? ModEntityData.get(item, ModAttachments.SAFE_RECOVERY_POS)
+                : null;
+
+        RecoveryTargetCacheKey key = new RecoveryTargetCacheKey(
+                level.dimension(),
+                item.blockPosition().immutable(),
+                ownerId,
+                safePos
+        );
+
+        long gameTime = level.getGameTime();
+        RecoveryTargetCacheValue cached = RECOVERY_TARGET_CACHE.get(key);
+        if (cached != null && cached.gameTime == gameTime) {
+            return cached.target;
+        }
+
+        RecoveryTarget resolved = resolveRecoveryTarget(level, item);
+        RECOVERY_TARGET_CACHE.put(key, new RecoveryTargetCacheValue(gameTime, resolved));
+
+        if (RECOVERY_TARGET_CACHE.size() > 4096) {
+            RECOVERY_TARGET_CACHE.clear();
+        }
+
+        return resolved;
     }
 
     /**
@@ -903,7 +985,182 @@ public class DeathEventHandler {
         SAFE_POS_HISTORY.remove(uuid);
         PENDING_DEATH_POS.remove(uuid);
         PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
+        OWNED_DEATH_DROP_IDS.remove(uuid);
         GLOW_TEAMS_INITIALIZED.remove(uuid);
+    }
+
+    /**
+     * 服务器停止时清理全部运行时状态。
+     * <p>
+     * 主要用于单机环境下切换世界，避免静态缓存跨世界残留。
+     */
+    @SubscribeEvent
+    public static void onServerStopped(ServerStoppedEvent event) {
+        SAVED_ITEMS.clear();
+        INVENTORY_SNAPSHOTS.clear();
+        SAFE_POS_HISTORY.clear();
+        PENDING_DEATH_POS.clear();
+        PRIVATE_HIGHLIGHT_COLORS.clear();
+        DEATH_DROP_SNAPSHOTS.clear();
+        NEXT_DEATH_DROP_SNAPSHOT_ID.clear();
+        OWNED_DEATH_DROP_IDS.clear();
+        GLOW_TEAMS_INITIALIZED.clear();
+        RECOVERY_TARGET_CACHE.clear();
+    }
+
+    private static void captureDeathDropSnapshot(ServerPlayer player,
+                                                 Map<Integer, ItemStack> inventorySnapshot,
+                                                 Collection<ItemEntity> drops) {
+        Map<Integer, ItemStack> slotItems = new LinkedHashMap<>();
+        int containerSize = player.getInventory().getContainerSize();
+
+        // 优先使用死亡瞬间背包槽位快照，确保 UI 能按原槽位还原
+        if (inventorySnapshot != null && !inventorySnapshot.isEmpty()) {
+            for (var entry : inventorySnapshot.entrySet()) {
+                if (!entry.getValue().isEmpty()) {
+                    slotItems.put(entry.getKey(), entry.getValue().copy());
+                }
+            }
+        } else {
+            // 回退：极少数情况下若无背包快照，则按掉落顺序写入临时槽位
+            int fallbackSlot = 0;
+            for (ItemEntity entity : drops) {
+                ItemStack stack = entity.getItem();
+                if (!stack.isEmpty()) {
+                    slotItems.put(fallbackSlot++, stack.copy());
+                }
+            }
+            containerSize = Math.max(containerSize, slotItems.size());
+        }
+
+        if (slotItems.isEmpty()) {
+            return;
+        }
+
+        UUID playerId = player.getUUID();
+        int snapshotId = NEXT_DEATH_DROP_SNAPSHOT_ID.compute(playerId, (ignored, old) -> old == null ? 1 : old + 1);
+        DeathDropSnapshot snapshot = new DeathDropSnapshot(
+                snapshotId,
+                player.getGameProfile().getName(),
+                player.level().dimension(),
+                player.blockPosition().immutable(),
+                player.level().getGameTime(),
+                containerSize,
+                slotItems
+        );
+
+        Deque<DeathDropSnapshot> deque = DEATH_DROP_SNAPSHOTS.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
+        deque.addFirst(snapshot);
+
+        int maxSnapshots = Math.max(1, Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER.get());
+        while (deque.size() > maxSnapshots) {
+            deque.removeLast();
+        }
+    }
+
+    private static DeathDropSnapshotSummary toSummary(DeathDropSnapshot snapshot) {
+        return new DeathDropSnapshotSummary(
+                snapshot.id(),
+                snapshot.playerName(),
+                snapshot.dimension(),
+                snapshot.deathPos(),
+                snapshot.slotItems().size(),
+                snapshot.gameTime()
+        );
+    }
+
+    public static List<DeathDropSnapshotPlayerSummary> getDeathDropSnapshotPlayerSummaries() {
+        if (DEATH_DROP_SNAPSHOTS.isEmpty()) {
+            return List.of();
+        }
+
+        List<DeathDropSnapshotPlayerSummary> result = new ArrayList<>(DEATH_DROP_SNAPSHOTS.size());
+        for (var entry : DEATH_DROP_SNAPSHOTS.entrySet()) {
+            UUID playerId = entry.getKey();
+            Deque<DeathDropSnapshot> deque = entry.getValue();
+            if (deque == null || deque.isEmpty()) {
+                continue;
+            }
+            DeathDropSnapshot latest = deque.peekFirst();
+            result.add(new DeathDropSnapshotPlayerSummary(playerId, latest.playerName(), deque.size()));
+        }
+        result.sort((a, b) -> a.playerName().compareToIgnoreCase(b.playerName()));
+        return result;
+    }
+
+    public static List<DeathDropSnapshotSummary> getDeathDropSnapshotSummaries(UUID playerId) {
+        Deque<DeathDropSnapshot> snapshots = DEATH_DROP_SNAPSHOTS.get(playerId);
+        if (snapshots == null || snapshots.isEmpty()) {
+            return List.of();
+        }
+
+        List<DeathDropSnapshotSummary> summaries = new ArrayList<>(snapshots.size());
+        for (DeathDropSnapshot snapshot : snapshots) {
+            summaries.add(toSummary(snapshot));
+        }
+        return summaries;
+    }
+
+    public static DeathDropSnapshotView getDeathDropSnapshot(UUID playerId, int snapshotId) {
+        Deque<DeathDropSnapshot> snapshots = DEATH_DROP_SNAPSHOTS.get(playerId);
+        if (snapshots == null || snapshots.isEmpty()) {
+            return null;
+        }
+
+        for (DeathDropSnapshot snapshot : snapshots) {
+            if (snapshot.id() == snapshotId) {
+                Map<Integer, ItemStack> copied = new LinkedHashMap<>();
+                for (var entry : snapshot.slotItems().entrySet()) {
+                    copied.put(entry.getKey(), entry.getValue().copy());
+                }
+                return new DeathDropSnapshotView(toSummary(snapshot), snapshot.containerSize(), copied);
+            }
+        }
+        return null;
+    }
+
+    public static int restoreDeathDropSnapshot(ServerPlayer target, int snapshotId) {
+        DeathDropSnapshotView view = getDeathDropSnapshot(target.getUUID(), snapshotId);
+        if (view == null) {
+            return -1;
+        }
+
+        int restoredStacks = 0;
+        List<Map.Entry<Integer, ItemStack>> entries = new ArrayList<>(view.slotItems().entrySet());
+        entries.sort(Map.Entry.comparingByKey());
+
+        for (var entry : entries) {
+            int slot = entry.getKey();
+            ItemStack stack = entry.getValue();
+            if (stack.isEmpty()) {
+                continue;
+            }
+            restoredStacks++;
+            ItemStack copy = stack.copy();
+
+            if (slot >= 0 && slot < target.getInventory().getContainerSize()) {
+                copy = insertIntoSlot(target.getInventory(), slot, copy);
+            }
+
+            if (!copy.isEmpty() && !target.getInventory().add(copy)) {
+                target.drop(copy, true, false);
+            }
+        }
+        return restoredStacks;
+    }
+
+    public static int restoreLatestDeathDropSnapshot(ServerPlayer target) {
+        Deque<DeathDropSnapshot> snapshots = DEATH_DROP_SNAPSHOTS.get(target.getUUID());
+        if (snapshots == null || snapshots.isEmpty()) {
+            return -1;
+        }
+        return restoreDeathDropSnapshot(target, snapshots.peekFirst().id());
+    }
+
+    public static int clearDeathDropSnapshots(UUID playerId) {
+        Deque<DeathDropSnapshot> removed = DEATH_DROP_SNAPSHOTS.remove(playerId);
+        NEXT_DEATH_DROP_SNAPSHOT_ID.remove(playerId);
+        return removed == null ? 0 : removed.size();
     }
 
     /**
@@ -928,43 +1185,64 @@ public class DeathEventHandler {
         // 确保该玩家已收到所有颜色队伍的创建包
         ensureGlowTeamsSent(player);
 
-        List<ItemEntity> nearbyItems = serverLevel.getEntitiesOfClass(
-                ItemEntity.class,
-            player.getBoundingBox().inflate(scanRadius),
-                item -> item.isAlive() && ModEntityData.has(item, ModAttachments.OWNER_UUID)
-        );
-
         Config.GlowVisibility visibility = Config.COMMON.GLOW_VISIBILITY.get();
         // 缓存 owner -> shouldShow 结果，避免同一归属者的多个掉落物重复查询队伍/离线缓存
         Map<UUID, Boolean> shouldShowCache = new HashMap<>();
+        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        List<Integer> staleTrackedIds = new ArrayList<>();
+        double scanRadiusSq = scanRadius * scanRadius;
 
         int processed = 0;
-        for (ItemEntity item : nearbyItems) {
-            if (processed >= maxScannedEntities) {
-                break;
-            }
-            processed++;
-
-            UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
-            boolean shouldShow = shouldShowCache.computeIfAbsent(owner,
-                    o -> shouldShowGlowTo(player, o, visibility, serverLevel));
-
-            if (shouldShow) {
-                int entityId = item.getId();
-                ChatFormatting color = getGlowColorForItem(item);
-                current.put(entityId, color);
-
-                ChatFormatting prevColor = previous.get(entityId);
-                if (prevColor == null) {
-                    // 新增高亮
-                    sendPrivateGlowPacket(player, item, true);
-                    sendGlowColorPacket(player, item, color);
-                } else if (prevColor != color) {
-                    // 颜色变化：先从旧队伍移除，再加入新队伍
-                    removeGlowColorPacket(player, item, prevColor);
-                    sendGlowColorPacket(player, item, color);
+        if (trackedEntityIds != null) {
+            for (Integer entityId : trackedEntityIds) {
+                if (processed >= maxScannedEntities) {
+                    break;
                 }
-                // 颜色相同则无需重复发送
+
+                Entity maybeEntity = serverLevel.getEntity(entityId);
+                if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()) {
+                    staleTrackedIds.add(entityId);
+                    continue;
+                }
+
+                if (item.distanceToSqr(player) > scanRadiusSq) {
+                    continue;
+                }
+
+                if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+                    staleTrackedIds.add(entityId);
+                    continue;
+                }
+
+                processed++;
+                UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
+                boolean shouldShow = shouldShowCache.computeIfAbsent(owner,
+                        o -> shouldShowGlowTo(player, o, visibility, serverLevel));
+
+                if (shouldShow) {
+                    int visibleEntityId = item.getId();
+                    ChatFormatting color = getGlowColorForItem(item);
+                    current.put(visibleEntityId, color);
+
+                    ChatFormatting prevColor = previous.get(visibleEntityId);
+                    if (prevColor == null) {
+                        // 新增高亮
+                        sendPrivateGlowPacket(player, item, true);
+                        sendGlowColorPacket(player, item, color);
+                    } else if (prevColor != color) {
+                        // 颜色变化：先从旧队伍移除，再加入新队伍
+                        removeGlowColorPacket(player, item, prevColor);
+                        sendGlowColorPacket(player, item, color);
+                    }
+                    // 颜色相同则无需重复发送
+                }
+            }
+        }
+
+        if (trackedEntityIds != null && !staleTrackedIds.isEmpty()) {
+            trackedEntityIds.removeAll(staleTrackedIds);
+            if (trackedEntityIds.isEmpty()) {
+                OWNED_DEATH_DROP_IDS.remove(playerId);
             }
         }
 
@@ -1071,6 +1349,22 @@ public class DeathEventHandler {
         }
     }
 
+    /** 从归属索引中移除已失效/被拾取的掉落物实体 ID。 */
+    private static void untrackOwnedDropEntity(ItemEntity item) {
+        if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+            return;
+        }
+        UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
+        Set<Integer> tracked = OWNED_DEATH_DROP_IDS.get(owner);
+        if (tracked == null) {
+            return;
+        }
+        tracked.remove(item.getId());
+        if (tracked.isEmpty()) {
+            OWNED_DEATH_DROP_IDS.remove(owner);
+        }
+    }
+
     /**
      * 向指定玩家发送实体发光状态的定向数据包。
      * 仅修改该玩家客户端的发光标志，不影响服务端实体状态。
@@ -1139,6 +1433,10 @@ public class DeathEventHandler {
 
     public static int getSavedItemsPlayerCount() {
         return SAVED_ITEMS.size();
+    }
+
+    public static int getDeathDropSnapshotPlayerCount() {
+        return DEATH_DROP_SNAPSHOTS.size();
     }
 
     public static int getInventorySnapshotPlayerCount() {

@@ -11,13 +11,16 @@ import top.theillusivec4.curios.api.CuriosCapability;
 public class CuriosCompat {
     private CuriosCompat() {}
 
+    /** 模组加载状态在启动后固定，缓存后避免热点路径重复查表。 */
+    private static final boolean IS_CURIOS_LOADED = ModList.get().isLoaded("curios");
+
     /**
      * 检查物品是否拥有 Curios ITEM Capability。
      * <p>
      * 内部已做模组加载检查，可安全调用。
      */
     public static boolean isCurio(ItemStack stack) {
-        if (!ModList.get().isLoaded("curios")) return false;
+        if (!IS_CURIOS_LOADED) return false;
         return stack.getCapability(CuriosCapability.ITEM) != null;
     }
 

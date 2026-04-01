@@ -91,6 +91,7 @@ public class Config {
         public final ModConfigSpec.IntValue VOID_RECOVERY_MAX_RECOVERIES;
         public final ModConfigSpec.IntValue VOID_RECOVERY_COOLDOWN_TICKS;
         public final ModConfigSpec.BooleanValue RESTORE_SLOTS_ENABLED;
+        public final ModConfigSpec.IntValue DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER;
 
         @SuppressWarnings({"deprecation", "null"}) // deprecation: defineList 旧版重载; null: MC API 误报
         public Common(ModConfigSpec.Builder builder) {
@@ -193,11 +194,12 @@ public class Config {
                     + "私有高亮扫描间隔（tick），值越小刻新越快但服务器开销越大\n"
                     + "示例：10 = 每 0.5 秒扫描一次").defineInRange("privateHighlightScanIntervalTicks", 10, 1, 200);
             PRIVATE_HIGHLIGHT_SCAN_RADIUS = builder.comment(
-                    "Private highlight scan radius in blocks (8.0–256.0)\n"
-                    + "私有高亮扫描半径（方块），超出该范围的掉落物不会高亮").defineInRange("privateHighlightScanRadius", 96.0, 8.0, 256.0);
+                    "Private highlight scan radius in blocks (8.0–1024.0)\n"
+                    + "私有高亮扫描半径（方块），超出该范围的掉落物不会高亮\n"
+                    + "提示：半径越大，单次扫描需要处理的归属掉落物越多").defineInRange("privateHighlightScanRadius", 96.0, 8.0, 1024.0);
             PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES = builder.comment(
-                    "Max item entities processed per highlight scan (16–4096)\n"
-                    + "每次扫描最多处理的掉落物实体数，用于限制服务器开销").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 4096);
+                    "Max item entities processed per highlight scan (16–16384)\n"
+                    + "每次扫描最多处理的掉落物实体数，用于限制服务器开销").defineInRange("privateHighlightMaxScannedEntities", 256, 16, 16384);
 
             builder.push("DroppedItemGlow");
             GLOW_VISIBILITY = builder.comment(
@@ -255,6 +257,9 @@ public class Config {
             RESTORE_SLOTS_ENABLED = builder.comment(
                     "Try to restore preserved items to their original inventory slots\n"
                     + "尝试将保留的物品放回死亡前的原始槽位（如工具栏、护甲栏等）").define("restoreSlots", true);
+            DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER = builder.comment(
+                    "Max death-drop snapshots stored per player (1–128)\n"
+                    + "每个玩家最多保留的死亡掉落快照数量，超过后自动淘汰最旧快照").defineInRange("deathDropSnapshotMaxPerPlayer", 12, 1, 128);
             builder.pop();
         }
     }

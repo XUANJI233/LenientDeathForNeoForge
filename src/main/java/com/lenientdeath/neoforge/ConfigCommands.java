@@ -6,9 +6,14 @@ import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.common.ModConfigSpec;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import org.slf4j.Logger;
@@ -17,7 +22,9 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 注册并处理 {@code /lenientdeath} 命令树，包括配置读写、玩家列表操作和调试信息。
@@ -56,9 +63,10 @@ public final class ConfigCommands {
                                 })))
                 .then(enumSetting("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanSetting("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
+                .then(intSetting("deathDropSnapshotMaxPerPlayer", Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER, 1, 128))
                 .then(intSetting("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
-                .then(doubleSetting("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
-                .then(intSetting("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 4096))
+                .then(doubleSetting("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 1024.0))
+                .then(intSetting("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 16384))
                 .then(intSetting("voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS, 1, 1200))
                 .then(intSetting("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
                 .then(intSetting("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
@@ -85,12 +93,94 @@ public final class ConfigCommands {
                         }))
                 .then(enumGetter("voidRecoveryMode", Config.COMMON.VOID_RECOVERY_MODE))
                 .then(booleanGetter("restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED))
+                .then(intGetter("deathDropSnapshotMaxPerPlayer", Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER, 1, 128))
                 .then(intGetter("privateHighlightScanIntervalTicks", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS, 1, 200))
-                .then(doubleGetter("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 256.0))
-                .then(intGetter("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 4096))
+                .then(doubleGetter("privateHighlightScanRadius", Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_RADIUS, 8.0, 1024.0))
+                .then(intGetter("privateHighlightMaxScannedEntities", Config.COMMON.PRIVATE_HIGHLIGHT_MAX_SCANNED_ENTITIES, 16, 16384))
                 .then(intGetter("voidRecoveryWindowTicks", Config.COMMON.VOID_RECOVERY_WINDOW_TICKS, 1, 1200))
                 .then(intGetter("voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES, 1, 100))
                 .then(intGetter("voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS, 1, 1200));
+
+            LiteralArgumentBuilder<CommandSourceStack> snapshot = Commands.literal("snapshot")
+                .then(Commands.literal("ui")
+                    .executes(context -> openSnapshotUiRoot(context.getSource()))
+                    .then(Commands.literal("player")
+                        .then(Commands.argument("player", StringArgumentType.word())
+                            .executes(context -> openSnapshotUiPlayer(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "player")))))
+                    .then(Commands.literal("snapshot")
+                        .then(Commands.argument("player", StringArgumentType.word())
+                            .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                                .executes(context -> openSnapshotUiSnapshot(
+                                    context.getSource(),
+                                    StringArgumentType.getString(context, "player"),
+                                    IntegerArgumentType.getInteger(context, "snapshotId"),
+                                    1))
+                                .then(Commands.argument("page", IntegerArgumentType.integer(1))
+                                    .executes(context -> openSnapshotUiSnapshot(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "player"),
+                                        IntegerArgumentType.getInteger(context, "snapshotId"),
+                                        IntegerArgumentType.getInteger(context, "page"))))))))
+                    .then(Commands.literal("gui")
+                        .executes(context -> openSnapshotUiRoot(context.getSource()))
+                        .then(Commands.literal("player")
+                            .then(Commands.argument("player", StringArgumentType.word())
+                                .executes(context -> openSnapshotUiPlayer(
+                                    context.getSource(),
+                                    StringArgumentType.getString(context, "player")))))
+                        .then(Commands.literal("snapshot")
+                            .then(Commands.argument("player", StringArgumentType.word())
+                                .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                                    .executes(context -> openSnapshotUiSnapshot(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "player"),
+                                        IntegerArgumentType.getInteger(context, "snapshotId"),
+                                        1))))))
+                .then(Commands.literal("list")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .executes(context -> openSnapshotUiPlayer(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "player")))))
+                .then(Commands.literal("show")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                            .executes(context -> openSnapshotUiSnapshot(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "player"),
+                                IntegerArgumentType.getInteger(context, "snapshotId"),
+                                1))
+                            .then(Commands.argument("page", IntegerArgumentType.integer(1))
+                                .executes(context -> openSnapshotUiSnapshot(
+                                    context.getSource(),
+                                    StringArgumentType.getString(context, "player"),
+                                    IntegerArgumentType.getInteger(context, "snapshotId"),
+                                    IntegerArgumentType.getInteger(context, "page")))))))
+                .then(Commands.literal("restore")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                            .executes(context -> requestRestoreDeathDropSnapshot(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "player"),
+                                IntegerArgumentType.getInteger(context, "snapshotId"))))))
+                .then(Commands.literal("confirmRestore")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .then(Commands.argument("snapshotId", IntegerArgumentType.integer(1))
+                            .executes(context -> confirmRestoreDeathDropSnapshot(
+                                context.getSource(),
+                                StringArgumentType.getString(context, "player"),
+                                IntegerArgumentType.getInteger(context, "snapshotId"))))))
+                .then(Commands.literal("restoreLatest")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .executes(context -> requestRestoreLatestDeathDropSnapshot(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "player")))))
+                .then(Commands.literal("clear")
+                    .then(Commands.argument("player", StringArgumentType.word())
+                        .executes(context -> clearDeathDropSnapshots(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "player")))));
 
         // --- preserve: 始终保留物品/标签管理 ---
         LiteralArgumentBuilder<CommandSourceStack> preserve = Commands.literal("preserve")
@@ -217,6 +307,7 @@ public final class ConfigCommands {
                                 .then(drop)
                                 .then(Commands.literal("reload")
                                         .executes(context -> reloadFromFile(context.getSource()))))
+                        .then(snapshot)
                         .then(Commands.literal("debug")
                                 .then(Commands.literal("status")
                                         .executes(context -> {
@@ -226,6 +317,7 @@ public final class ConfigCommands {
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.void_recovery_debug", DeathEventHandler.getVoidRecoveryDebug()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.saved_items", DeathEventHandler.getSavedItemsPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.snapshots", DeathEventHandler.getInventorySnapshotPlayerCount()), false);
+                                            context.getSource().sendSuccess(() -> Component.literal("Death drop snapshot players: " + DeathEventHandler.getDeathDropSnapshotPlayerCount()), false);
                                             context.getSource().sendSuccess(() -> Component.translatable("lenientdeath.command.debug.status.pending_death_pos", DeathEventHandler.getPendingDeathPositionPlayerCount()), false);
                                             return 1;
                                         })))
@@ -331,6 +423,7 @@ public final class ConfigCommands {
             applyInt(fileConfig, "Features.voidRecoveryMaxRecoveries", Config.COMMON.VOID_RECOVERY_MAX_RECOVERIES);
             applyInt(fileConfig, "Features.voidRecoveryCooldownTicks", Config.COMMON.VOID_RECOVERY_COOLDOWN_TICKS);
             applyBoolean(fileConfig, "Features.restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED);
+            applyInt(fileConfig, "Features.deathDropSnapshotMaxPerPlayer", Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER);
 
             ManualAllowAndBlocklist.INSTANCE.refreshItems();
 
@@ -594,4 +687,151 @@ public final class ConfigCommands {
         }
         return values.size();
     }
+
+    private static int openSnapshotUiRoot(CommandSourceStack source) {
+        if (!(source.getEntity() instanceof ServerPlayer viewer)) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
+            return 0;
+        }
+        SnapshotChestMenu.openRoot(viewer);
+        return 1;
+    }
+
+    private static int openSnapshotUiPlayer(CommandSourceStack source, String playerName) {
+        if (!(source.getEntity() instanceof ServerPlayer viewer)) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
+            return 0;
+        }
+        SnapshotChestMenu.openPlayer(viewer, playerName);
+        return 1;
+    }
+
+    private static int openSnapshotUiSnapshot(CommandSourceStack source, String playerName, int snapshotId, int page) {
+        if (!(source.getEntity() instanceof ServerPlayer viewer)) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
+            return 0;
+        }
+        SnapshotChestMenu.openSnapshot(viewer, playerName, snapshotId);
+        return 1;
+    }
+
+    private static int requestRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        UUID playerId = findSnapshotPlayerIdByName(playerName);
+        if (playerId == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
+            return 0;
+        }
+        if (DeathEventHandler.getDeathDropSnapshot(playerId, snapshotId) == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.not_found", snapshotId));
+            return 0;
+        }
+
+        String confirm = "/lenientdeath snapshot confirmRestore " + playerName + " " + snapshotId;
+        String cancel = "/lenientdeath snapshot ui snapshot " + playerName + " " + snapshotId;
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.restore.confirm_prompt", playerName, snapshotId), false);
+        source.sendSuccess(() -> clickableButton(
+                Component.translatable("lenientdeath.command.snapshot.restore.confirm_yes"),
+                confirm,
+                Component.translatable("lenientdeath.command.snapshot.restore.confirm_yes.hover"),
+                ChatFormatting.RED), false);
+        source.sendSuccess(() -> clickableButton(
+                Component.translatable("lenientdeath.command.snapshot.restore.confirm_no"),
+                cancel,
+                Component.translatable("lenientdeath.command.snapshot.restore.confirm_no.hover"),
+                ChatFormatting.GRAY), false);
+        return 1;
+    }
+
+    private static int confirmRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        ServerPlayer target = source.getServer().getPlayerList().getPlayerByName(playerName);
+        if (target == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.restore.player_offline", playerName));
+            return 0;
+        }
+
+        int restored = DeathEventHandler.restoreDeathDropSnapshot(target, snapshotId);
+        if (restored < 0) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.not_found", snapshotId));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.restore.success", snapshotId, playerName, restored), true);
+        return 1;
+    }
+
+    private static int requestRestoreLatestDeathDropSnapshot(CommandSourceStack source, String playerName) {
+        UUID playerId = findSnapshotPlayerIdByName(playerName);
+        if (playerId == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
+            return 0;
+        }
+
+        List<DeathEventHandler.DeathDropSnapshotSummary> snapshots = DeathEventHandler.getDeathDropSnapshotSummaries(playerId);
+        if (snapshots.isEmpty()) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.ui.player.empty", playerName));
+            return 0;
+        }
+
+        int latestId = snapshots.stream().mapToInt(DeathEventHandler.DeathDropSnapshotSummary::id).max().orElse(-1);
+        return requestRestoreDeathDropSnapshot(source, playerName, latestId);
+    }
+
+    private static int clearDeathDropSnapshots(CommandSourceStack source, String playerName) {
+        UUID playerId = findSnapshotPlayerIdByName(playerName);
+        if (playerId == null) {
+            source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
+            return 0;
+        }
+
+        int cleared = DeathEventHandler.clearDeathDropSnapshots(playerId);
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.clear.success", playerName, cleared), true);
+        return 1;
+    }
+
+    private static UUID findSnapshotPlayerIdByName(String playerName) {
+        for (DeathEventHandler.DeathDropSnapshotPlayerSummary p : DeathEventHandler.getDeathDropSnapshotPlayerSummaries()) {
+            if (p.playerName().equalsIgnoreCase(playerName)) {
+                return p.playerId();
+            }
+        }
+        return null;
+    }
+
+    private static MutableComponent clickableButton(Component label, String command, Component hover, ChatFormatting color) {
+        return Component.literal("[")
+                .append(label)
+                .append(Component.literal("]"))
+                .withStyle(style -> style
+                        .withColor(color)
+                        .withBold(true)
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command))
+                        .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, hover)));
+    }
+
+    private static void renderInventoryLayout(CommandSourceStack source, DeathEventHandler.DeathDropSnapshotView view) {
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.hotbar"), false);
+        sendRow(source, view, 0, 9);
+
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.main"), false);
+        sendRow(source, view, 9, 18);
+        sendRow(source, view, 18, 27);
+        sendRow(source, view, 27, 36);
+
+        source.sendSuccess(() -> Component.translatable("lenientdeath.command.snapshot.ui.snapshot.section.extra"), false);
+        sendRow(source, view, 36, Math.min(view.containerSize(), 41));
+    }
+
+    private static void sendRow(CommandSourceStack source, DeathEventHandler.DeathDropSnapshotView view, int startInclusive, int endExclusive) {
+        MutableComponent line = Component.empty();
+        for (int slot = startInclusive; slot < endExclusive; slot++) {
+            var stack = view.slotItems().get(slot);
+            boolean present = stack != null && !stack.isEmpty();
+            Component cell = present
+                    ? Component.translatable("lenientdeath.command.snapshot.ui.snapshot.cell.filled", slot)
+                    : Component.translatable("lenientdeath.command.snapshot.ui.snapshot.cell.empty", slot);
+            line.append(cell).append(Component.literal(" "));
+        }
+        source.sendSuccess(() -> line, false);
+    }
+
+    private record SlotItemView(int slot, Component name, int count) {}
 }

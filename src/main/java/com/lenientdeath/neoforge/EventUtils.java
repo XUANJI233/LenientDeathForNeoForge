@@ -271,28 +271,25 @@ public final class EventUtils {
                     }
                 }
                 mh = lookup.unreflect(m);
-                // adapt to (Object, Object)void so LambdaMetafactory can create an Invoker
-                final MethodType samType = MethodType.methodType(void.class, Object.class, Object.class);
-                final MethodHandle adapted;
+                // LambdaMetafactory needs a direct handle; use mh directly.
+                // For no-arg targets we skip lambda generation and rely on MethodHandle/reflection fallback.
                 if (noArg) {
-                    // mh has shape (DeclaringClass)void; add a dummy second arg
-                    adapted = MethodHandles.dropArguments(mh, 1, Object.class)
-                            .asType(MethodType.methodType(void.class, Object.class, Object.class));
-                } else {
-                    adapted = mh.asType(MethodType.methodType(void.class, Object.class, Object.class));
-                }
-                try {
-                    final CallSite site = LambdaMetafactory.metafactory(
-                            lookup,
-                            "invoke",
-                            MethodType.methodType(Invoker.class),
-                            samType,
-                            adapted,
-                            adapted.type());
-                    final MethodHandle factory = site.getTarget();
-                    inv = (Invoker) factory.invoke();
-                } catch (final Throwable lmfe) {
                     inv = null;
+                } else {
+                    final MethodType samType = MethodType.methodType(void.class, Object.class, Object.class);
+                    try {
+                        final CallSite site = LambdaMetafactory.metafactory(
+                                lookup,
+                                "invoke",
+                                MethodType.methodType(Invoker.class),
+                                samType,
+                                mh,
+                                samType);
+                        final MethodHandle factory = site.getTarget();
+                        inv = (Invoker) factory.invoke();
+                    } catch (final Throwable lmfe) {
+                        inv = null;
+                    }
                 }
             } catch (final Throwable ignore) {
                 // if MethodHandle creation fails, fall back to reflection-only CancelInvoker

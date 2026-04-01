@@ -107,6 +107,8 @@ public class DeathEventHandler {
     private static final double VOID_RECOVERY_TRIGGER_OFFSET = 8.0;
     /** 即时虚空恢复判定余量：玩家死亡 Y 低于 (minBuildHeight + margin) 时，在掉落物生成时立即恢复。 */
     private static final double IMMEDIATE_VOID_RECOVERY_Y_MARGIN = 8.0;
+    /** 单次安全点搜索最多检查的候选方块数，避免极端场景压垮主线程。 */
+    private static final int MAX_SAFE_SPOT_CHECKS_PER_SEARCH = 12000;
     /** Entity shared flags 同步数据的 slot ID（固定为 0）。 */
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     /** Entity shared flags 中发光位的掩码。 */
@@ -157,6 +159,8 @@ public class DeathEventHandler {
     private static final Map<UUID, Deque<Integer>> PENDING_SNAPSHOT_RESTORES = new ConcurrentHashMap<>();
     /** 每个玩家拥有的死亡掉落实体 ID，用于私有高亮增量扫描，避免全世界实体查询。 */
     private static final Map<UUID, Set<Integer>> OWNED_DEATH_DROP_IDS = new ConcurrentHashMap<>();
+    /** 归属玩家 UUID -> 记分板名称缓存，避免离线时触发 ProfileCache 查询。 */
+    private static final Map<UUID, String> OWNER_SCOREBOARD_NAMES = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
     private static final Set<UUID> GLOW_TEAMS_INITIALIZED = ConcurrentHashMap.newKeySet();
     /** 同 tick 恢复目标缓存（仅用于削峰，超出上限时整体清理）。 */
@@ -394,6 +398,7 @@ public class DeathEventHandler {
             // 标记掉落物归属，供私有高亮使用
             UUID ownerId = player.getUUID();
             ModEntityData.put(entity, ModAttachments.OWNER_UUID, ownerId);
+            OWNER_SCOREBOARD_NAMES.put(ownerId, player.getScoreboardName());
             ModEntityData.put(entity, ModAttachments.IS_DEATH_DROP, true);
             OWNED_DEATH_DROP_IDS.computeIfAbsent(ownerId, ignored -> ConcurrentHashMap.newKeySet()).add(entity.getId());
 
@@ -696,9 +701,11 @@ public class DeathEventHandler {
     private static BlockPos findNearestSafeSpot(ServerLevel level, ItemEntity item, BlockPos center, int horizontalRadius, int verticalRange) {
         BlockPos best = null;
         double bestDistanceSq = Double.MAX_VALUE;
+        int checks = 0;
 
         int minY = Math.max(level.getMinBuildHeight() + 1, center.getY() - verticalRange);
         int maxY = Math.min(level.getMaxBuildHeight() - 2, center.getY() + verticalRange);
+        int centerY = Math.max(minY, Math.min(maxY, center.getY()));
 
         // 使用 MutableBlockPos 避免在多重循环中大量创建 BlockPos 对象
         BlockPos.MutableBlockPos candidate = new BlockPos.MutableBlockPos();
@@ -716,16 +723,55 @@ public class DeathEventHandler {
                     // 只检查半径 r 的外环边界（内部已在更小半径时检查过）
                     if (r > 0 && Math.abs(dx) < r && Math.abs(dz) < r) continue;
 
-                    for (int y = minY; y <= maxY; y++) {
-                        candidate.set(center.getX() + dx, y, center.getZ() + dz);
-                        if (!isValidRecoverySpot(level, item, candidate)) {
+                    int horizontalDistanceSq = dx * dx + dz * dz;
+                    if (best != null && horizontalDistanceSq >= bestDistanceSq) {
+                        continue;
+                    }
+
+                    int maxVerticalDistance = verticalRange;
+                    if (best != null) {
+                        double remaining = bestDistanceSq - horizontalDistanceSq;
+                        if (remaining < 0) {
+                            continue;
+                        }
+                        maxVerticalDistance = Math.min(maxVerticalDistance, (int) Math.floor(Math.sqrt(remaining)));
+                    }
+
+                    for (int dy = 0; dy <= maxVerticalDistance; dy++) {
+                        int yUp = centerY + dy;
+                        if (yUp <= maxY) {
+                            checks++;
+                            if (checks > MAX_SAFE_SPOT_CHECKS_PER_SEARCH) {
+                                return best;
+                            }
+                            candidate.set(center.getX() + dx, yUp, center.getZ() + dz);
+                            if (isValidRecoverySpot(level, item, candidate)) {
+                                double distanceSq = candidate.distSqr(center);
+                                if (distanceSq < bestDistanceSq) {
+                                    bestDistanceSq = distanceSq;
+                                    best = candidate.immutable();
+                                }
+                            }
+                        }
+
+                        if (dy == 0) {
                             continue;
                         }
 
-                        double distanceSq = candidate.distSqr(center);
-                        if (distanceSq < bestDistanceSq) {
-                            bestDistanceSq = distanceSq;
-                            best = candidate.immutable();
+                        int yDown = centerY - dy;
+                        if (yDown >= minY) {
+                            checks++;
+                            if (checks > MAX_SAFE_SPOT_CHECKS_PER_SEARCH) {
+                                return best;
+                            }
+                            candidate.set(center.getX() + dx, yDown, center.getZ() + dz);
+                            if (isValidRecoverySpot(level, item, candidate)) {
+                                double distanceSq = candidate.distSqr(center);
+                                if (distanceSq < bestDistanceSq) {
+                                    bestDistanceSq = distanceSq;
+                                    best = candidate.immutable();
+                                }
+                            }
                         }
                     }
                 }
@@ -1000,6 +1046,8 @@ public class DeathEventHandler {
             return;
         }
 
+        OWNER_SCOREBOARD_NAMES.put(player.getUUID(), player.getScoreboardName());
+
         Deque<Integer> queued = PENDING_SNAPSHOT_RESTORES.remove(player.getUUID());
         if (queued == null || queued.isEmpty()) {
             return;
@@ -1046,6 +1094,7 @@ public class DeathEventHandler {
         NEXT_DEATH_DROP_SNAPSHOT_ID.clear();
         PENDING_SNAPSHOT_RESTORES.clear();
         OWNED_DEATH_DROP_IDS.clear();
+        OWNER_SCOREBOARD_NAMES.clear();
         GLOW_TEAMS_INITIALIZED.clear();
         RECOVERY_TARGET_CACHE.clear();
     }
@@ -1330,14 +1379,11 @@ public class DeathEventHandler {
                 if (ownerPlayer != null) {
                     ownerTeam = ownerPlayer.getTeam() instanceof PlayerTeam pt ? pt : null;
                 } else {
-                    // 玩家离线，通过 ProfileCache 获取玩家名再查记分板队伍
-                    var profileCache = level.getServer().getProfileCache();
-                    if (profileCache != null) {
-                        var profileOpt = profileCache.get(ownerId);
-                        if (profileOpt.isPresent()) {
-                            Scoreboard scoreboard = level.getScoreboard();
-                            ownerTeam = scoreboard.getPlayersTeam(profileOpt.get().getName());
-                        }
+                    // 玩家离线时只使用运行期缓存名称，避免主线程潜在 I/O。
+                    String ownerScoreboardName = OWNER_SCOREBOARD_NAMES.get(ownerId);
+                    if (ownerScoreboardName != null && !ownerScoreboardName.isEmpty()) {
+                        Scoreboard scoreboard = level.getScoreboard();
+                        ownerTeam = scoreboard.getPlayersTeam(ownerScoreboardName);
                     }
                 }
                 if (ownerTeam == null && viewerTeam == null && Config.COMMON.NO_TEAM_IS_VALID_TEAM.get()) {
@@ -1414,6 +1460,7 @@ public class DeathEventHandler {
         tracked.remove(item.getId());
         if (tracked.isEmpty()) {
             OWNED_DEATH_DROP_IDS.remove(owner);
+            OWNER_SCOREBOARD_NAMES.remove(owner);
         }
     }
 

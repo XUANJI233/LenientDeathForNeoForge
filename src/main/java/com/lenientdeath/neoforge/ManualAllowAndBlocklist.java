@@ -25,6 +25,8 @@ public class ManualAllowAndBlocklist {
 
     private final Set<Item> alwaysPreserved = new HashSet<>();
     private final Set<Item> alwaysDroppedItems = new HashSet<>();
+    private final Set<TagKey<Item>> alwaysPreservedTags = new HashSet<>();
+    private final Set<TagKey<Item>> alwaysDroppedTags = new HashSet<>();
 
     public void setup() {
         // 配置值仅在 ModConfig 加载后可读取。
@@ -33,7 +35,13 @@ public class ManualAllowAndBlocklist {
 
     protected @Nullable Boolean shouldKeep(ItemStack stack) {
         if (alwaysDroppedItems.contains(stack.getItem())) return false;
+        for (TagKey<Item> tag : alwaysDroppedTags) {
+            if (stack.is(tag)) return false;
+        }
         if (alwaysPreserved.contains(stack.getItem())) return true;
+        for (TagKey<Item> tag : alwaysPreservedTags) {
+            if (stack.is(tag)) return true;
+        }
         return null;
     }
 
@@ -51,6 +59,8 @@ public class ManualAllowAndBlocklist {
 
         this.alwaysPreserved.clear();
         this.alwaysDroppedItems.clear();
+        this.alwaysPreservedTags.clear();
+        this.alwaysDroppedTags.clear();
 
         LOGGER.debug("Creating always preserved list");
 
@@ -75,23 +85,14 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysPreservedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                // 直接从标签注册表查找，避免遍历所有注册物品
-                var tagHolder = BuiltInRegistries.ITEM.getTag(tagKey);
-                if (tagHolder.isPresent()) {
-                    for (var holder : tagHolder.get()) {
-                        this.alwaysPreserved.add(holder.value());
-                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(holder.value()));
-                    }
-                } else {
-                    LOGGER.warn("Tag not found in registry: {}", tagStr);
-                }
+                this.alwaysPreservedTags.add(tagKey);
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {
                 LOGGER.warn("Invalid tag ID: {}", tagStr);
             }
         }
 
-        LOGGER.debug("Total for always preserved: {}", this.alwaysPreserved.size());
+        LOGGER.debug("Total for always preserved: items={}, tags={}", this.alwaysPreserved.size(), this.alwaysPreservedTags.size());
 
         LOGGER.debug("Creating always dropped list");
 
@@ -116,22 +117,13 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysDroppedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                // 直接从标签注册表查找，避免遍历所有注册物品
-                var tagHolder = BuiltInRegistries.ITEM.getTag(tagKey);
-                if (tagHolder.isPresent()) {
-                    for (var holder : tagHolder.get()) {
-                        this.alwaysDroppedItems.add(holder.value());
-                        LOGGER.debug("Adding tag {} item {}", tagStr, BuiltInRegistries.ITEM.getKey(holder.value()));
-                    }
-                } else {
-                    LOGGER.warn("Tag not found in registry: {}", tagStr);
-                }
+                this.alwaysDroppedTags.add(tagKey);
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {
                 LOGGER.warn("Invalid tag ID: {}", tagStr);
             }
         }
 
-        LOGGER.debug("Total for always dropped: {}", this.alwaysDroppedItems.size());
+        LOGGER.debug("Total for always dropped: items={}, tags={}", this.alwaysDroppedItems.size(), this.alwaysDroppedTags.size());
     }
 }

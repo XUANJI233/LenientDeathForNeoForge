@@ -22,9 +22,11 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
 import net.minecraft.world.scores.Team;
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.common.util.TriState;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
 import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
@@ -32,6 +34,7 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -116,9 +119,9 @@ public class DeathEventHandler {
     /** 即时虚空恢复判定余量：玩家死亡 Y 低于 (minBuildHeight + margin) 时，在掉落物生成时立即恢复。 */
     private static final double IMMEDIATE_VOID_RECOVERY_Y_MARGIN = 8.0;
     /** 单次安全点搜索最多检查的候选方块数，避免极端场景压垮主线程。 */
-    private static final int MAX_SAFE_SPOT_CHECKS_PER_SEARCH = 12000;
+    private static final int MAX_SAFE_SPOT_CHECKS_PER_SEARCH = 4096;
     /** 同一 tick 内允许执行的昂贵三维搜索次数上限。 */
-    private static final int MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK = 6;
+    private static final int MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK = 2;
     /** 恢复目标缓存最大条目数（LRU 自动淘汰）。 */
     private static final int MAX_RECOVERY_TARGET_CACHE_ENTRIES = 4096;
     /** 恢复目标缓存坐标分桶粒度（方块）。 */
@@ -397,6 +400,22 @@ public class DeathEventHandler {
     }
 
     /**
+     * 死亡事件最终被其它模组取消时，清理 onPlayerDeath 中写入的临时状态。
+     * <p>
+     * onPlayerDeath 在 NORMAL 优先级运行，此处以 LOWEST 优先级并接受已取消的事件，
+     * 从而能捕获所有低优先级的死亡取消动作，避免 PENDING_DEATH_POS / INVENTORY_SNAPSHOTS
+     * 在玩家实际未死亡时永久驻留内存。
+     */
+    @SubscribeEvent(priority = EventPriority.LOWEST, receiveCanceled = true)
+    public static void onPlayerDeathCanceledCleanup(LivingDeathEvent event) {
+        if (!event.isCanceled()) return;
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        UUID uuid = player.getUUID();
+        PENDING_DEATH_POS.remove(uuid);
+        INVENTORY_SNAPSHOTS.remove(uuid);
+    }
+
+    /**
      * 掉落物生成时的核心处理：物品保留判定、属性标记、即时虚空恢复。
      */
     @SubscribeEvent
@@ -554,26 +573,73 @@ public class DeathEventHandler {
     }
 
     /**
-     * 实体 tick 前处理：对 ItemEntity 执行虚空/危险恢复。
+     * 服务器 tick 处理：仅在 DEATH_DROPS_ONLY 模式下，遍历所有已追踪的死亡掉落实体并执行
+     * 虚空/危险恢复。相比全局 EntityTickEvent，此方式只迭代数十个死亡掉落物，而非
+     * 服务器上可能存在的数千/万个 ItemEntity，大幅降低主线程 CPU 开销。
+     */
+    @SubscribeEvent
+    @SuppressWarnings("ConstantConditions")
+    public static void onServerTick(ServerTickEvent.Post event) {
+        boolean voidRecoveryEnabled = cachedVoidRecoveryEnabled;
+        boolean hazardRecoveryEnabled = cachedHazardRecoveryEnabled;
+        if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
+
+        // 此处仅处理 DEATH_DROPS_ONLY 模式；ALL_DROPS 模式由 onEntityTick 负责
+        if (cachedVoidRecoveryMode != Config.VoidRecoveryMode.DEATH_DROPS_ONLY) return;
+
+        if (ENTITY_DIMENSIONS.isEmpty()) return;
+
+        MinecraftServer server = event.getServer();
+        // Snapshot keySet to avoid ConcurrentModificationException if untrackOwnedDropEntity
+        // is called during iteration (e.g. from onEntityLeaveLevel callbacks fired mid-tick).
+        Integer[] entityIds = ENTITY_DIMENSIONS.keySet().toArray(Integer[]::new);
+        for (Integer entityId : entityIds) {
+            ResourceKey<Level> dimension = ENTITY_DIMENSIONS.get(entityId);
+            if (dimension == null) continue;
+            ServerLevel level = server.getLevel(dimension);
+            if (level == null) continue;
+
+            Entity maybeEntity = level.getEntity(entityId);
+            if (!(maybeEntity instanceof ItemEntity item)) continue;
+            // 在追踪的 ItemEntity 上执行恢复检查（无需额外的 DEATH_DROPS_ONLY 过滤，
+            // ENTITY_DIMENSIONS 中仅存储死亡掉落物）
+            processItemRecovery(item, level, voidRecoveryEnabled, hazardRecoveryEnabled);
+        }
+    }
+
+    /**
+     * 实体 tick 前处理：仅在 ALL_DROPS 模式下对 ItemEntity 执行虚空/危险恢复。
+     * <p>
+     * DEATH_DROPS_ONLY 模式（默认）下此方法立即返回，恢复逻辑由
+     * {@link #onServerTick} 负责，以避免对全服所有掉落物进行每 tick 扫描。
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
     public static void onEntityTick(EntityTickEvent.Pre event) {
+        // DEATH_DROPS_ONLY 模式由 onServerTick 处理，此处退出以节省全局实体 tick 开销
+        if (cachedVoidRecoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY) return;
+
         if (!(event.getEntity() instanceof ItemEntity item)) return;
         if (item.level().isClientSide) return;
 
         boolean voidRecoveryEnabled = cachedVoidRecoveryEnabled;
         boolean hazardRecoveryEnabled = cachedHazardRecoveryEnabled;
-        
         if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
 
-        // ── Step 1: Cheap condition checks (no attachment lookups) ───────────────────────────
-        // These are simple arithmetic/flag comparisons; perform them first to return quickly
-        // for the overwhelming majority of item entities that are in a safe state.
+        if (!(item.level() instanceof ServerLevel serverLevel)) return;
+        processItemRecovery(item, serverLevel, voidRecoveryEnabled, hazardRecoveryEnabled);
+    }
+
+    /**
+     * 对单个 ItemEntity 执行虚空/危险恢复检查，由 onServerTick 和 onEntityTick 共享调用。
+     */
+    @SuppressWarnings("ConstantConditions")
+    private static void processItemRecovery(ItemEntity item, ServerLevel serverLevel,
+                                            boolean voidRecoveryEnabled, boolean hazardRecoveryEnabled) {
         var lvl = item.level();
         String recoveryReason = null;
 
-        // 检查虚空
+        // ── Step 1: Cheap condition checks (no attachment lookups) ───────────────────────────
         if (voidRecoveryEnabled) {
             double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
             double currentY = item.getY();
@@ -582,15 +648,13 @@ public class DeathEventHandler {
                 recoveryReason = "void";
             }
         }
-        
-        // 检查火焰/岩浆（仅当未触发虚空恢复时）
+
         if (recoveryReason == null && hazardRecoveryEnabled) {
             if (item.isOnFire() || item.isInLava()) {
                 recoveryReason = item.isInLava() ? "lava" : "fire";
             }
         }
 
-        // Early exit for safe items — no attachment/capability lookups performed
         if (recoveryReason == null) {
             if (isVoidRecoveryDebugEnabled() && voidRecoveryEnabled) {
                 double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
@@ -601,25 +665,9 @@ public class DeathEventHandler {
         }
 
         // ── Step 2: Attachment lookups (only reached when item needs recovery) ─────────────
-        // Performing these after the condition check avoids querying the attachment/capability
-        // map for every item entity on every tick in DEATH_DROPS_ONLY mode.
         Config.VoidRecoveryMode recoveryMode = cachedVoidRecoveryMode;
 
-        // 根据模式过滤非死亡掉落物
-        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY) {
-            boolean isDeathDrop = ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
-                    && ModEntityData.get(item, ModAttachments.IS_DEATH_DROP);
-            if (!isDeathDrop) {
-                if (isVoidRecoveryDebugEnabled()) {
-                    LOGGER.info("[LenientDeath][Recovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
-                            item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
-                }
-                return;
-            }
-        }
-
         // 检查是否刚刚恢复过（避免同一tick重复处理）
-        // 使用恢复时的tick记录，仅跳过同一tick内的重复触发
         if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
             int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
             if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
@@ -636,30 +684,38 @@ public class DeathEventHandler {
             return;
         }
 
-        if (lvl instanceof ServerLevel serverLevel) {
-            // 在传送前记录原始位置用于日志
-            double fromX = item.getX();
-            double fromY = item.getY();
-            double fromZ = item.getZ();
+        double fromX = item.getX();
+        double fromY = item.getY();
+        double fromZ = item.getZ();
 
-            RecoveryTarget recoveryTarget = resolveRecoveryTargetWithCache(serverLevel, item);
-            teleportItemToSafety(item, recoveryTarget.pos());
-            
-            // 火焰/岩浆恢复后灭火
-            if ("lava".equals(recoveryReason) || "fire".equals(recoveryReason)) {
-                item.clearFire();
-            }
+        RecoveryTarget recoveryTarget = resolveRecoveryTargetWithCache(serverLevel, item);
+        teleportItemToSafety(item, recoveryTarget.pos());
 
-            // 标记恢复tick，避免同tick重复处理（但允许之后再次被拯救）
-            ModEntityData.put(item, ModAttachments.VOID_RECOVERED, item.tickCount);
-
-            if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
-                        item.getId(), recoveryMode, recoveryReason, recoveryTarget.source(),
-                        fromX, fromY, fromZ,
-                        recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY(), recoveryTarget.pos().getZ() + 0.5);
-            }
+        if ("lava".equals(recoveryReason) || "fire".equals(recoveryReason)) {
+            item.clearFire();
         }
+
+        ModEntityData.put(item, ModAttachments.VOID_RECOVERED, item.tickCount);
+
+        if (isVoidRecoveryDebugEnabled()) {
+            LOGGER.info("[LenientDeath][Recovery] Recover item {} mode={} trigger={} source={} from ({}, {}, {}) -> ({}, {}, {})",
+                    item.getId(), recoveryMode, recoveryReason, recoveryTarget.source(),
+                    fromX, fromY, fromZ,
+                    recoveryTarget.pos().getX() + 0.5, recoveryTarget.pos().getY(), recoveryTarget.pos().getZ() + 0.5);
+        }
+    }
+
+    /**
+     * 实体离开世界时（消散/销毁），从追踪数据结构中清除对应的死亡掉落实体 ID。
+     * <p>
+     * 配合对 null 结果的保守处理策略（区块卸载时 getEntity 返回 null，
+     * 但实体并未真正消失），此事件是检测实体永久消失的可靠来源。
+     */
+    @SubscribeEvent
+    public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
+        if (!(event.getEntity() instanceof ItemEntity item)) return;
+        if (event.getLevel().isClientSide()) return;
+        untrackOwnedDropEntity(item);
     }
 
     /**
@@ -1395,9 +1451,17 @@ public class DeathEventHandler {
         if (getDeathDropSnapshot(playerId, snapshotId) == null) {
             return false;
         }
-        PENDING_SNAPSHOT_RESTORES
-                .computeIfAbsent(playerId, ignored -> new ArrayDeque<>())
-                .addLast(snapshotId);
+        Deque<Integer> queue = PENDING_SNAPSHOT_RESTORES.computeIfAbsent(playerId, ignored -> new ArrayDeque<>());
+        // Deduplicate: do not queue the same snapshotId more than once.
+        // Without this guard an admin (or a command block loop) could repeatedly enqueue the
+        // same ID for an offline player, growing the deque without bound and eventually
+        // causing an OOM on the server.
+        // The O(n) contains() scan is acceptable here: the queue is bounded by
+        // DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER distinct snapshot IDs (typically ≤ 10),
+        // and this method is only called from admin commands, not hot paths.
+        if (!queue.contains(snapshotId)) {
+            queue.addLast(snapshotId);
+        }
         return true;
     }
 
@@ -1458,7 +1522,9 @@ public class DeathEventHandler {
                     ServerLevel entityLevel = server != null ? server.getLevel(entityDimension) : null;
                     if (entityLevel != null) {
                         Entity e = entityLevel.getEntity(entityId);
-                        if (!(e instanceof ItemEntity) || !e.isAlive()) {
+                        // null means entity might be in an unloaded chunk — skip conservatively.
+                        // onEntityLeaveLevel handles actual despawns.
+                        if (e != null && (!(e instanceof ItemEntity) || !e.isAlive())) {
                             staleTrackedIds.add(entityId);
                         }
                     }
@@ -1467,6 +1533,14 @@ public class DeathEventHandler {
                 }
 
                 Entity maybeEntity = serverLevel.getEntity(entityId);
+                if (maybeEntity == null) {
+                    // getEntity() returns null for entities in unloaded chunks as well as
+                    // truly-gone entities.  We cannot distinguish the two cases without
+                    // knowing the entity's last position, so we skip conservatively here.
+                    // Real despawns are handled by onEntityLeaveLevel, which calls
+                    // untrackOwnedDropEntity and removes the ID from ENTITY_DIMENSIONS.
+                    continue;
+                }
                 if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()) {
                     staleTrackedIds.add(entityId);
                     continue;
@@ -1744,6 +1818,11 @@ public class DeathEventHandler {
                 }
             }
             Entity maybeEntity = entityLevel.getEntity(entityId);
+            if (maybeEntity == null) {
+                // Null result could mean the entity is in an unloaded chunk, not necessarily gone.
+                // Skip conservatively; real despawns are caught by onEntityLeaveLevel.
+                continue;
+            }
             if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()
                     || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
                 stale.add(entityId);
@@ -1793,12 +1872,31 @@ public class DeathEventHandler {
     /**
      * 更新高频事件中使用的配置缓存。
      * 由 {@code ModConfigEvent.Loading} 和 {@code ModConfigEvent.Reloading} 触发调用，
-     * 避免在 {@link #onEntityTick} 等极高频事件中直接调用 {@code ConfigValue#get()}。
+     * 避免在 {@link #onServerTick} 等极高频事件中直接调用 {@code ConfigValue#get()}。
+     * <p>
+     * 也在此时修剪所有玩家的死亡快照队列，以便在管理员调低快照上限后立即释放内存，
+     * 而不必等到每位玩家再次死亡才触发缩容逻辑。
      */
     public static void onConfigLoaded() {
         cachedVoidRecoveryEnabled = Config.COMMON.VOID_RECOVERY_ENABLED.get();
         cachedHazardRecoveryEnabled = Config.COMMON.HAZARD_RECOVERY_ENABLED.get();
         cachedVoidRecoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
+        trimAllSnapshotsToCurrentLimit();
+    }
+
+    /**
+     * 将所有玩家的死亡快照队列修剪至当前配置的最大快照数。
+     * <p>
+     * 仅在队列大于上限时才执行 {@code removeLast}，因此对未超限玩家的开销为零。
+     */
+    private static void trimAllSnapshotsToCurrentLimit() {
+        if (DEATH_DROP_SNAPSHOTS.isEmpty()) return;
+        int maxSnapshots = Math.max(1, Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER.get());
+        for (Deque<DeathDropSnapshot> deque : DEATH_DROP_SNAPSHOTS.values()) {
+            while (deque.size() > maxSnapshots) {
+                deque.removeLast();
+            }
+        }
     }
 
     private static int getPrivateHighlightIntervalTicks() {

@@ -403,8 +403,7 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
             return;
         }
 
-        // 底部玩家背包区域交给父类处理，保持原生点击/移动逻辑。
-        super.clicked(slotId, button, clickType, player);
+        // 底部玩家背包区域也禁用，避免 UI 菜单被当作物品操作界面
     }
 
     @Override

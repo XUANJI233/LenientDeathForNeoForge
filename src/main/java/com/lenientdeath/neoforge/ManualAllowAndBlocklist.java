@@ -10,6 +10,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -23,10 +24,13 @@ public class ManualAllowAndBlocklist {
     public static final ManualAllowAndBlocklist INSTANCE = new ManualAllowAndBlocklist();
     private ManualAllowAndBlocklist() {}
 
-    private final Set<Item> alwaysPreserved = new HashSet<>();
-    private final Set<Item> alwaysDroppedItems = new HashSet<>();
-    private final Set<TagKey<Item>> alwaysPreservedTags = new HashSet<>();
-    private final Set<TagKey<Item>> alwaysDroppedTags = new HashSet<>();
+    // Volatile references to immutable snapshots allow lock-free concurrent reads in shouldKeep().
+    // refreshItems() builds new sets entirely before publishing them atomically, so readers
+    // never observe a partially-initialised state even when config reload runs on an async thread.
+    private volatile Set<Item> alwaysPreserved = Collections.emptySet();
+    private volatile Set<Item> alwaysDroppedItems = Collections.emptySet();
+    private volatile Set<TagKey<Item>> alwaysPreservedTags = Collections.emptySet();
+    private volatile Set<TagKey<Item>> alwaysDroppedTags = Collections.emptySet();
 
     public void setup() {
         // 配置值仅在 ModConfig 加载后可读取。
@@ -34,12 +38,19 @@ public class ManualAllowAndBlocklist {
     }
 
     protected @Nullable Boolean shouldKeep(ItemStack stack) {
-        if (alwaysDroppedItems.contains(stack.getItem())) return false;
-        for (TagKey<Item> tag : alwaysDroppedTags) {
+        // Read volatile references once so the entire call sees a consistent snapshot,
+        // guarding against a concurrent refreshItems() swapping the sets mid-call.
+        Set<Item> dropped = this.alwaysDroppedItems;
+        Set<TagKey<Item>> droppedTags = this.alwaysDroppedTags;
+        Set<Item> preserved = this.alwaysPreserved;
+        Set<TagKey<Item>> preservedTags = this.alwaysPreservedTags;
+
+        if (dropped.contains(stack.getItem())) return false;
+        for (TagKey<Item> tag : droppedTags) {
             if (stack.is(tag)) return false;
         }
-        if (alwaysPreserved.contains(stack.getItem())) return true;
-        for (TagKey<Item> tag : alwaysPreservedTags) {
+        if (preserved.contains(stack.getItem())) return true;
+        for (TagKey<Item> tag : preservedTags) {
             if (stack.is(tag)) return true;
         }
         return null;
@@ -57,10 +68,12 @@ public class ManualAllowAndBlocklist {
             return;
         }
 
-        this.alwaysPreserved.clear();
-        this.alwaysDroppedItems.clear();
-        this.alwaysPreservedTags.clear();
-        this.alwaysDroppedTags.clear();
+        // Build completely new sets before publishing to avoid readers observing a
+        // partially-cleared or partially-populated state during concurrent access.
+        Set<Item> newPreserved = new HashSet<>();
+        Set<Item> newDropped = new HashSet<>();
+        Set<TagKey<Item>> newPreservedTags = new HashSet<>();
+        Set<TagKey<Item>> newDroppedTags = new HashSet<>();
 
         LOGGER.debug("Creating always preserved list");
 
@@ -76,7 +89,7 @@ public class ManualAllowAndBlocklist {
                     continue;
                 }
                 LOGGER.debug("Adding item {}", itemId);
-                this.alwaysPreserved.add(item);
+                newPreserved.add(item);
             } catch (Exception e) {
                 LOGGER.warn("Invalid item ID: {}", itemId);
             }
@@ -85,14 +98,14 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysPreservedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                this.alwaysPreservedTags.add(tagKey);
+                newPreservedTags.add(tagKey);
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {
                 LOGGER.warn("Invalid tag ID: {}", tagStr);
             }
         }
 
-        LOGGER.debug("Total for always preserved: items={}, tags={}", this.alwaysPreserved.size(), this.alwaysPreservedTags.size());
+        LOGGER.debug("Total for always preserved: items={}, tags={}", newPreserved.size(), newPreservedTags.size());
 
         LOGGER.debug("Creating always dropped list");
 
@@ -108,7 +121,7 @@ public class ManualAllowAndBlocklist {
                     continue;
                 }
                 LOGGER.debug("Adding item {}", itemId);
-                this.alwaysDroppedItems.add(item);
+                newDropped.add(item);
             } catch (Exception e) {
                 LOGGER.warn("Invalid item ID: {}", itemId);
             }
@@ -117,13 +130,20 @@ public class ManualAllowAndBlocklist {
         for (String tagStr : alwaysDroppedTags) {
             try {
                 TagKey<Item> tagKey = TagKey.create(BuiltInRegistries.ITEM.key(), ResourceLocation.parse(tagStr));
-                this.alwaysDroppedTags.add(tagKey);
+                newDroppedTags.add(tagKey);
                 LOGGER.debug("Adding tag {}", tagStr);
             } catch (Exception e) {
                 LOGGER.warn("Invalid tag ID: {}", tagStr);
             }
         }
 
-        LOGGER.debug("Total for always dropped: items={}, tags={}", this.alwaysDroppedItems.size(), this.alwaysDroppedTags.size());
+        LOGGER.debug("Total for always dropped: items={}, tags={}", newDropped.size(), newDroppedTags.size());
+
+        // Atomically publish the fully-built snapshots. After these writes, any concurrent
+        // shouldKeep() call will see either the old complete snapshot or the new one – never a mix.
+        this.alwaysPreserved = Collections.unmodifiableSet(newPreserved);
+        this.alwaysDroppedItems = Collections.unmodifiableSet(newDropped);
+        this.alwaysPreservedTags = Collections.unmodifiableSet(newPreservedTags);
+        this.alwaysDroppedTags = Collections.unmodifiableSet(newDroppedTags);
     }
 }

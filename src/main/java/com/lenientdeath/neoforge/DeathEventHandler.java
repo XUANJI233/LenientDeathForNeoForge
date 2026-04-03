@@ -19,7 +19,6 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
 import net.minecraft.world.scores.Team;
@@ -34,6 +33,8 @@ import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -126,6 +127,17 @@ public class DeathEventHandler {
     /** Entity shared flags 中发光位的掩码。 */
     private static final byte GLOWING_FLAG_MASK = 0x40;
     /**
+     * Number of distinct spread buckets used when scattering teleported items.
+     * Each bucket maps to a unique horizontal velocity so items from the same death event
+     * land within a ±({@value #TELEPORT_SPREAD_BUCKETS}/2 * {@value #TELEPORT_SPREAD_SCALE})
+     * block radius rather than stacking at one coordinate.
+     */
+    private static final int TELEPORT_SPREAD_BUCKETS = 7;
+    /** Blocks-per-tick scale for the item-spread velocity; max horizontal speed = ±{@code (TELEPORT_SPREAD_BUCKETS/2) * TELEPORT_SPREAD_SCALE}. */
+    private static final double TELEPORT_SPREAD_SCALE = 0.03;
+    /** Small upward velocity applied on teleport so items arc gently away from the floor surface. */
+    private static final double TELEPORT_UPWARD_VELOCITY = 0.05;
+    /**
      * isValidRecoverySpot 内部复用的临时可变位置（仅服务端主线程调用，无并发风险）。
      * 避免每次安全点检查都分配新的 BlockPos 对象，消除 GC 压力。
      */
@@ -139,8 +151,8 @@ public class DeathEventHandler {
     /** 反射失败时只警告一次的标志位（volatile 保证多线程可见性）。 */
     private static volatile boolean SHARED_FLAGS_ACCESSOR_WARNED = false;
 
-    /** 通过反射获取的 ItemEntity.age 字段，用于计算发光颜色。 */
-    private static final Field ITEM_ENTITY_AGE_FIELD = resolveItemEntityAgeField();
+    /** VarHandle for ItemEntity.age, used to read the field without Field.getInt() overhead on every tick. */
+    private static final VarHandle ITEM_ENTITY_AGE_HANDLE = resolveItemEntityAgeHandle();
 
     // ── 发光颜色队伍基础设施 ────────────────────────────────────
 
@@ -214,14 +226,21 @@ public class DeathEventHandler {
         }
     }
 
-    /** 反射获取 ItemEntity 的 age 字段，用于计算物品剩余寿命和发光颜色。 */
-    private static Field resolveItemEntityAgeField() {
+    /**
+     * Obtain a VarHandle for {@code ItemEntity.age}.
+     * <p>
+     * VarHandle gives access semantics equivalent to {@link Field#getInt} but is compiled by the JIT
+     * as a direct field read without the per-call access-check overhead, which matters because
+     * {@link #getItemEntityAge} is invoked from the glow-colour scan every few ticks per tracked item.
+     */
+    private static VarHandle resolveItemEntityAgeHandle() {
         try {
             Field field = ItemEntity.class.getDeclaredField("age");
             field.setAccessible(true);
-            return field;
-        } catch (NoSuchFieldException e) {
-            LOGGER.error("Failed to resolve ItemEntity.age field, glow color will default to green", e);
+            // unreflectVarHandle honours the already-set accessible flag, so no module-open is needed.
+            return MethodHandles.lookup().unreflectVarHandle(field);
+        } catch (ReflectiveOperationException e) {
+            LOGGER.error("Failed to resolve ItemEntity.age VarHandle, glow color will default to green", e);
             return null;
         }
     }
@@ -242,14 +261,10 @@ public class DeathEventHandler {
         return teams;
     }
 
-    /** 读取 ItemEntity 的 age 字段值（反射）。 */
+    /** Reads {@code ItemEntity.age} via the pre-resolved VarHandle (JIT-inlinable, no per-call access check). */
     private static int getItemEntityAge(ItemEntity item) {
-        if (ITEM_ENTITY_AGE_FIELD == null) return 0;
-        try {
-            return ITEM_ENTITY_AGE_FIELD.getInt(item);
-        } catch (IllegalAccessException e) {
-            return 0;
-        }
+        if (ITEM_ENTITY_AGE_HANDLE == null) return 0;
+        return (int) ITEM_ENTITY_AGE_HANDLE.get(item);
     }
 
     /**
@@ -958,19 +973,30 @@ public class DeathEventHandler {
      * <p>
      * pos 是 feetPos（地板上方的空气方块），物品被放在该方块底部（地板表面）。
      * 重置速度、下落距离，并给予短暂拾取冷却让物品稳定落地。
+     * <p>
+     * 为避免多个物品精确重叠在同一坐标（可能引发视觉堆叠），
+     * 根据实体 ID 给予微小的确定性水平散布速度（最大 ±0.09 格/tick），
+     * 不影响落点安全性而可使物品自然分散到 1–2 格范围内。
      */
     private static void teleportItemToSafety(ItemEntity item, BlockPos pos) {
         double targetX = pos.getX() + 0.5;
         double targetY = pos.getY();
         double targetZ = pos.getZ() + 0.5;
-        
-        // 重置速度，避免传送后继续下坠
-        item.setDeltaMovement(Vec3.ZERO);
-        
+
+        // Tiny deterministic spread based on entity ID so multiple items from the same death
+        // event don't pile up at the exact same coordinate.  Prime multipliers (7, 11) and
+        // offsets (13, 7) for x/z produce independent hash patterns; TELEPORT_SPREAD_BUCKETS
+        // caps the modulo range; TELEPORT_SPREAD_SCALE converts bucket index to blocks/tick.
+        int id = item.getId();
+        double vx = ((id * 7 + 13) % TELEPORT_SPREAD_BUCKETS - TELEPORT_SPREAD_BUCKETS / 2) * TELEPORT_SPREAD_SCALE;
+        double vz = ((id * 11 + 7) % TELEPORT_SPREAD_BUCKETS - TELEPORT_SPREAD_BUCKETS / 2) * TELEPORT_SPREAD_SCALE;
+
+        item.setDeltaMovement(vx, TELEPORT_UPWARD_VELOCITY, vz);
+
         // setPos + hurtMarked 强制同步位置到客户端
         item.setPos(targetX, targetY, targetZ);
         item.hurtMarked = true;
-        
+
         item.setNoGravity(false);
         item.setPickUpDelay(20);  // 拾取冷却 1 秒
         item.fallDistance = 0.0f; // 重置下落距离

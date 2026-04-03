@@ -772,13 +772,15 @@ public class DeathEventHandler {
             return preferredPos;
         }
 
-        // 安全点附近微调，避免目标点刚好被临时方块占用
+        // 安全点附近微调，避免目标点刚好被临时方块占用。
+        // 使用单个 MutableBlockPos 避免每个候选位置分配新 BlockPos 对象（GC 压力）。
+        BlockPos.MutableBlockPos candidate = new BlockPos.MutableBlockPos();
         for (int radius = 1; radius <= 3; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
-                    BlockPos candidate = preferredPos.offset(dx, 0, dz);
+                    candidate.set(preferredPos.getX() + dx, preferredPos.getY(), preferredPos.getZ() + dz);
                     if (isValidRecoverySpot(level, item, candidate)) {
-                        return candidate;
+                        return candidate.immutable();
                     }
                 }
             }
@@ -1149,7 +1151,16 @@ public class DeathEventHandler {
         DEATH_DROP_SNAPSHOTS.remove(uuid);
         NEXT_DEATH_DROP_SNAPSHOT_ID.remove(uuid);
         PENDING_SNAPSHOT_RESTORES.remove(uuid);
-        OWNED_DEATH_DROP_IDS.remove(uuid);
+        // Clean up ENTITY_DIMENSIONS for all drop IDs the player owned.
+        // Without this, every entity ID that was tracked for the logging-out player
+        // becomes an orphaned entry in ENTITY_DIMENSIONS that is never removed until
+        // the server restarts, causing an unbounded memory leak over long sessions.
+        Set<Integer> ownedIds = OWNED_DEATH_DROP_IDS.remove(uuid);
+        if (ownedIds != null) {
+            for (Integer entityId : ownedIds) {
+                ENTITY_DIMENSIONS.remove(entityId);
+            }
+        }
         OWNER_SCOREBOARD_NAMES.remove(uuid);
         GLOW_TEAMS_INITIALIZED.remove(uuid);
     }
@@ -1385,11 +1396,21 @@ public class DeathEventHandler {
     }
 
     /**
-     * 刷新指定玩家的私有高亮：扫描附近归属该玩家的 ItemEntity，
-     * 发送发光数据包和颜色队伍数据包，根据物品剩余寿命动态着色。
+     * 刷新指定玩家的私有高亮：扫描附近归属该玩家（及在当前可见性模式下
+     * 其他玩家）的 ItemEntity，发送发光数据包和颜色队伍数据包。
      * <p>
      * 可见性由 {@link Config.GlowVisibility} 控制：
-     * DEAD_PLAYER / DEAD_PLAYER_AND_TEAM / EVERYONE。
+     * <ul>
+     *   <li>DEAD_PLAYER — 只有掉落物的归属玩家自己能看到（原有行为）</li>
+     *   <li>DEAD_PLAYER_AND_TEAM — 归属玩家及其队伍成员都能看到</li>
+     *   <li>EVERYONE — 所有玩家都能看到所有死亡掉落物</li>
+     * </ul>
+     * <p>
+     * 修复：DEAD_PLAYER 模式下仅扫描本玩家自己的 OWNED_DEATH_DROP_IDS；
+     * DEAD_PLAYER_AND_TEAM / EVERYONE 模式下还会扫描其他玩家的
+     * OWNED_DEATH_DROP_IDS，使对应玩家真正能看到高亮效果。
+     * 陈旧实体的清理（ENTITY_DIMENSIONS 等）只在各自归属玩家的扫描中进行，
+     * 避免跨玩家误删。
      */
     private static void refreshPrivateHighlights(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel serverLevel)) {
@@ -1409,14 +1430,16 @@ public class DeathEventHandler {
         Config.GlowVisibility visibility = Config.COMMON.GLOW_VISIBILITY.get();
         // 缓存 owner -> shouldShow 结果，避免同一归属者的多个掉落物重复查询队伍/离线缓存
         Map<UUID, Boolean> shouldShowCache = new HashMap<>();
-        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
-        List<Integer> staleTrackedIds = new ArrayList<>();
         double scanRadiusSq = scanRadius * scanRadius;
         MinecraftServer server = player.getServer();
 
         int processed = 0;
-        if (trackedEntityIds != null) {
-            for (Integer entityId : trackedEntityIds) {
+
+        // ── 第一阶段：扫描本玩家自己的死亡掉落物（并清理陈旧 ID）────────────────────
+        Set<Integer> ownTrackedIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        List<Integer> staleTrackedIds = new ArrayList<>();
+        if (ownTrackedIds != null) {
+            for (Integer entityId : ownTrackedIds) {
                 if (processed >= maxScannedEntities) {
                     break;
                 }
@@ -1464,31 +1487,95 @@ public class DeathEventHandler {
 
                     HighlightEntry prevEntry = previous.get(visibleEntityId);
                     if (prevEntry == null) {
-                        // 新增高亮
                         sendPrivateGlowPacket(player, item, true);
                         sendGlowColorPacket(player, item, color);
                     } else if (prevEntry.color() != color) {
-                        // 颜色变化：先从旧队伍移除，再加入新队伍（item 此处仍存活，可直接使用）
                         removeGlowColorPacket(player, item, prevEntry.color());
                         sendGlowColorPacket(player, item, color);
                     }
-                    // 颜色相同则无需重复发送
                 }
             }
         }
 
-        if (trackedEntityIds != null && !staleTrackedIds.isEmpty()) {
-            trackedEntityIds.removeAll(staleTrackedIds);
+        // 清理自己的陈旧实体 ID
+        if (ownTrackedIds != null && !staleTrackedIds.isEmpty()) {
+            ownTrackedIds.removeAll(staleTrackedIds);
             for (Integer staleId : staleTrackedIds) {
                 ENTITY_DIMENSIONS.remove(staleId);
             }
-            if (trackedEntityIds.isEmpty()) {
+            if (ownTrackedIds.isEmpty()) {
                 OWNED_DEATH_DROP_IDS.remove(playerId);
                 OWNER_SCOREBOARD_NAMES.remove(playerId);
             }
         }
 
-        // 移除不再可见的旧高亮
+        // ── 第二阶段：当模式为 DEAD_PLAYER_AND_TEAM / EVERYONE 时，
+        //              还需扫描其他玩家的死亡掉落物并判断当前玩家是否应看到 ────────────────
+        // 修复：旧代码仅扫描 OWNED_DEATH_DROP_IDS.get(playerId)（本玩家自己的掉落物），
+        // 导致 DEAD_PLAYER_AND_TEAM / EVERYONE 模式下非归属玩家永远看不到高亮。
+        if (visibility != Config.GlowVisibility.DEAD_PLAYER && processed < maxScannedEntities) {
+            for (Map.Entry<UUID, Set<Integer>> ownerEntry : OWNED_DEATH_DROP_IDS.entrySet()) {
+                UUID ownerId = ownerEntry.getKey();
+                if (ownerId.equals(playerId)) {
+                    // 已在第一阶段处理
+                    continue;
+                }
+
+                // 跳过本玩家不应看到的归属者（DEAD_PLAYER_AND_TEAM 检查队伍，EVERYONE 全通过）
+                boolean shouldShow = shouldShowCache.computeIfAbsent(ownerId,
+                        o -> shouldShowGlowTo(player, o, visibility, serverLevel));
+                if (!shouldShow) {
+                    continue;
+                }
+
+                Set<Integer> otherOwnedIds = ownerEntry.getValue();
+                if (otherOwnedIds == null || otherOwnedIds.isEmpty()) {
+                    continue;
+                }
+
+                for (Integer entityId : otherOwnedIds) {
+                    if (processed >= maxScannedEntities) {
+                        break;
+                    }
+
+                    ResourceKey<Level> entityDimension = ENTITY_DIMENSIONS.get(entityId);
+                    if (entityDimension != null && !entityDimension.equals(serverLevel.dimension())) {
+                        // 不同维度：跳过，不在此处清理陈旧 ID（由归属玩家自己的扫描负责）
+                        continue;
+                    }
+
+                    Entity maybeEntity = serverLevel.getEntity(entityId);
+                    if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()) {
+                        // 不清理陈旧 ID，留给归属玩家的扫描处理
+                        continue;
+                    }
+
+                    if (item.distanceToSqr(player) > scanRadiusSq) {
+                        continue;
+                    }
+
+                    processed++;
+                    int visibleEntityId = item.getId();
+                    ChatFormatting color = getGlowColorForItem(item);
+                    current.put(visibleEntityId, new HighlightEntry(color, item.getStringUUID()));
+
+                    HighlightEntry prevEntry = previous.get(visibleEntityId);
+                    if (prevEntry == null) {
+                        sendPrivateGlowPacket(player, item, true);
+                        sendGlowColorPacket(player, item, color);
+                    } else if (prevEntry.color() != color) {
+                        removeGlowColorPacket(player, item, prevEntry.color());
+                        sendGlowColorPacket(player, item, color);
+                    }
+                }
+
+                if (processed >= maxScannedEntities) {
+                    break;
+                }
+            }
+        }
+
+        // ── 移除不再可见的旧高亮 ─────────────────────────────────────────────────────
         // 注意：即使实体已消失（自然消散），也必须发送队伍移除包，否则客户端队伍列表将无限积累废弃 UUID。
         for (var entry : previous.entrySet()) {
             int entityId = entry.getKey();

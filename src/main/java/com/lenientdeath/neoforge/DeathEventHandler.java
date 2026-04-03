@@ -10,6 +10,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -65,6 +66,9 @@ public class DeathEventHandler {
 
     /** 恢复目标：安全传送的目标坐标及来源策略名称（用于调试日志）。 */
     private record RecoveryTarget(BlockPos pos, String source) {}
+
+    /** 私有高亮记录：发光颜色及实体 UUID 字符串（用于跨维度/实体消失后的清理包）。 */
+    private record HighlightEntry(ChatFormatting color, String entityUuidString) {}
 
     /** 同 tick 的恢复目标缓存键，使用分桶坐标提升附近掉落物共享命中。 */
     private record RecoveryTargetCacheKey(ResourceKey<Level> dimension, int bucketX, int bucketY, int bucketZ, UUID ownerId, GlobalPos safePos) {}
@@ -153,6 +157,12 @@ public class DeathEventHandler {
      */
     private static volatile boolean voidRecoveryDebug = false;
 
+    // ── 高频事件配置缓存（避免在 onEntityTick 中每 tick 调用 ConfigValue#get()） ──
+    // 在 onConfigLoaded() 中同步更新，由 ModConfigEvent.Loading / Reloading 触发。
+    private static volatile boolean cachedVoidRecoveryEnabled = true;
+    private static volatile boolean cachedHazardRecoveryEnabled = true;
+    private static volatile Config.VoidRecoveryMode cachedVoidRecoveryMode = Config.VoidRecoveryMode.DEATH_DROPS_ONLY;
+
     // ── 运行时状态（按玩家 UUID 索引） ────────────────────────────
 
     /** 死亡时保留的物品，在重生（Clone 事件）时还原。 */
@@ -163,8 +173,8 @@ public class DeathEventHandler {
     private static final Map<UUID, Deque<GlobalPos>> SAFE_POS_HISTORY = new ConcurrentHashMap<>();
     /** 待发送的死亡坐标消息（等到重生后发送更稳定）。 */
     private static final Map<UUID, GlobalPos> PENDING_DEATH_POS = new ConcurrentHashMap<>();
-    /** 每个玩家当前可见的私有高亮实体及其颜色（实体 ID → 队伍颜色）。 */
-    private static final Map<UUID, Map<Integer, ChatFormatting>> PRIVATE_HIGHLIGHT_COLORS = new ConcurrentHashMap<>();
+    /** 每个玩家当前可见的私有高亮实体及其颜色（实体 ID → 高亮记录）。 */
+    private static final Map<UUID, Map<Integer, HighlightEntry>> PRIVATE_HIGHLIGHT_COLORS = new ConcurrentHashMap<>();
     /** 每个玩家的死亡掉落快照（头部为最新）。 */
     private static final Map<UUID, Deque<DeathDropSnapshot>> DEATH_DROP_SNAPSHOTS = new ConcurrentHashMap<>();
     /** 每个玩家的自增快照 ID。 */
@@ -173,6 +183,8 @@ public class DeathEventHandler {
     private static final Map<UUID, Deque<Integer>> PENDING_SNAPSHOT_RESTORES = new ConcurrentHashMap<>();
     /** 每个玩家拥有的死亡掉落实体 ID，用于私有高亮增量扫描，避免全世界实体查询。 */
     private static final Map<UUID, Set<Integer>> OWNED_DEATH_DROP_IDS = new ConcurrentHashMap<>();
+    /** 每个已追踪的掉落实体 ID 所在的维度键，用于跨维度正确查找实体。 */
+    private static final Map<Integer, ResourceKey<Level>> ENTITY_DIMENSIONS = new ConcurrentHashMap<>();
     /** 归属玩家 UUID -> 记分板名称缓存，避免离线时触发 ProfileCache 查询。 */
     private static final Map<UUID, String> OWNER_SCOREBOARD_NAMES = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
@@ -440,6 +452,7 @@ public class DeathEventHandler {
             OWNER_SCOREBOARD_NAMES.put(ownerId, player.getScoreboardName());
             ModEntityData.put(entity, ModAttachments.IS_DEATH_DROP, true);
             OWNED_DEATH_DROP_IDS.computeIfAbsent(ownerId, ignored -> ConcurrentHashMap.newKeySet()).add(entity.getId());
+            ENTITY_DIMENSIONS.put(entity.getId(), player.level().dimension());
 
             // --- A. 物品保留 ---
             int amountToKeep = PreserveItems.howManyToPreserve(player, stack);
@@ -538,12 +551,12 @@ public class DeathEventHandler {
         if (!(event.getEntity() instanceof ItemEntity item)) return;
         if (item.level().isClientSide) return;
 
-        boolean voidRecoveryEnabled = Config.COMMON.VOID_RECOVERY_ENABLED.get();
-        boolean hazardRecoveryEnabled = Config.COMMON.HAZARD_RECOVERY_ENABLED.get();
+        boolean voidRecoveryEnabled = cachedVoidRecoveryEnabled;
+        boolean hazardRecoveryEnabled = cachedHazardRecoveryEnabled;
         
         if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
 
-        Config.VoidRecoveryMode recoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
+        Config.VoidRecoveryMode recoveryMode = cachedVoidRecoveryMode;
         boolean isDeathDrop = ModEntityData.has(item, ModAttachments.IS_DEATH_DROP) 
                 && ModEntityData.get(item, ModAttachments.IS_DEATH_DROP);
         
@@ -879,11 +892,10 @@ public class DeathEventHandler {
             return false;
         }
 
-        double targetX = feetPos.getX() + 0.5;
-        double targetY = feetPos.getY();
-        double targetZ = feetPos.getZ() + 0.5;
-        var movedBox = item.getBoundingBox().move(targetX - item.getX(), targetY - item.getY(), targetZ - item.getZ());
-        return level.noCollision(item, movedBox);
+        // feet and head are confirmed AIR — air blocks have empty VoxelShapes, so noCollision
+        // would always return true here. Skipping the call avoids allocating a new AABB object
+        // and performing expensive VoxelShape computation on every candidate position.
+        return true;
     }
 
     /**
@@ -1035,6 +1047,10 @@ public class DeathEventHandler {
         PRIVATE_HIGHLIGHT_COLORS.remove(uuid);
         GLOW_TEAMS_INITIALIZED.remove(uuid);
 
+        // 清理死亡瞬间记录的背包快照（keepInventory=true 或其他模组抑制了 LivingDropsEvent
+        // 导致 onPlayerDrops 未被调用时，快照可能残留）
+        INVENTORY_SNAPSHOTS.remove(uuid);
+
         // ── 死亡坐标消息 ─────────────────────────────────────
         // 优先从内存 Map 读取（正常重生），回退到 Attachment（死亡屏幕断连后重连）
         GlobalPos deathPos = PENDING_DEATH_POS.remove(uuid);
@@ -1172,6 +1188,7 @@ public class DeathEventHandler {
         OWNER_SCOREBOARD_NAMES.clear();
         GLOW_TEAMS_INITIALIZED.clear();
         RECOVERY_TARGET_CACHE.clear();
+        ENTITY_DIMENSIONS.clear();
         recoverySearchBudgetTick = Long.MIN_VALUE;
         expensiveRecoverySearchesThisTick = 0;
     }
@@ -1357,8 +1374,8 @@ public class DeathEventHandler {
         int maxScannedEntities = getPrivateHighlightMaxScannedEntities();
 
         UUID playerId = player.getUUID();
-        Map<Integer, ChatFormatting> previous = PRIVATE_HIGHLIGHT_COLORS.computeIfAbsent(playerId, ignored -> new HashMap<>());
-        Map<Integer, ChatFormatting> current = new HashMap<>();
+        Map<Integer, HighlightEntry> previous = PRIVATE_HIGHLIGHT_COLORS.computeIfAbsent(playerId, ignored -> new HashMap<>());
+        Map<Integer, HighlightEntry> current = new HashMap<>();
 
         // 确保该玩家已收到所有颜色队伍的创建包
         ensureGlowTeamsSent(player);
@@ -1369,12 +1386,29 @@ public class DeathEventHandler {
         Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
         List<Integer> staleTrackedIds = new ArrayList<>();
         double scanRadiusSq = scanRadius * scanRadius;
+        MinecraftServer server = player.getServer();
 
         int processed = 0;
         if (trackedEntityIds != null) {
             for (Integer entityId : trackedEntityIds) {
                 if (processed >= maxScannedEntities) {
                     break;
+                }
+
+                // 跨维度处理：实体可能在与玩家不同的维度（例如玩家在主世界，物品在地狱）
+                // 若 ENTITY_DIMENSIONS 中无记录（不应发生），视为在当前维度处理（兼容旧状态）
+                ResourceKey<Level> entityDimension = ENTITY_DIMENSIONS.get(entityId);
+                if (entityDimension != null && !entityDimension.equals(serverLevel.dimension())) {
+                    // 实体在不同维度：若该维度已加载则验证实体是否仍然存在，否则跳过（不标记为失效）
+                    ServerLevel entityLevel = server != null ? server.getLevel(entityDimension) : null;
+                    if (entityLevel != null) {
+                        Entity e = entityLevel.getEntity(entityId);
+                        if (!(e instanceof ItemEntity) || !e.isAlive()) {
+                            staleTrackedIds.add(entityId);
+                        }
+                    }
+                    // 不同维度的物品无需向当前维度的玩家发送高亮包
+                    continue;
                 }
 
                 Entity maybeEntity = serverLevel.getEntity(entityId);
@@ -1400,16 +1434,16 @@ public class DeathEventHandler {
                 if (shouldShow) {
                     int visibleEntityId = item.getId();
                     ChatFormatting color = getGlowColorForItem(item);
-                    current.put(visibleEntityId, color);
+                    current.put(visibleEntityId, new HighlightEntry(color, item.getStringUUID()));
 
-                    ChatFormatting prevColor = previous.get(visibleEntityId);
-                    if (prevColor == null) {
+                    HighlightEntry prevEntry = previous.get(visibleEntityId);
+                    if (prevEntry == null) {
                         // 新增高亮
                         sendPrivateGlowPacket(player, item, true);
                         sendGlowColorPacket(player, item, color);
-                    } else if (prevColor != color) {
-                        // 颜色变化：先从旧队伍移除，再加入新队伍
-                        removeGlowColorPacket(player, item, prevColor);
+                    } else if (prevEntry.color() != color) {
+                        // 颜色变化：先从旧队伍移除，再加入新队伍（item 此处仍存活，可直接使用）
+                        removeGlowColorPacket(player, item, prevEntry.color());
                         sendGlowColorPacket(player, item, color);
                     }
                     // 颜色相同则无需重复发送
@@ -1419,6 +1453,9 @@ public class DeathEventHandler {
 
         if (trackedEntityIds != null && !staleTrackedIds.isEmpty()) {
             trackedEntityIds.removeAll(staleTrackedIds);
+            for (Integer staleId : staleTrackedIds) {
+                ENTITY_DIMENSIONS.remove(staleId);
+            }
             if (trackedEntityIds.isEmpty()) {
                 OWNED_DEATH_DROP_IDS.remove(playerId);
                 OWNER_SCOREBOARD_NAMES.remove(playerId);
@@ -1426,13 +1463,17 @@ public class DeathEventHandler {
         }
 
         // 移除不再可见的旧高亮
+        // 注意：即使实体已消失（自然消散），也必须发送队伍移除包，否则客户端队伍列表将无限积累废弃 UUID。
         for (var entry : previous.entrySet()) {
             int entityId = entry.getKey();
             if (!current.containsKey(entityId)) {
+                HighlightEntry prev = entry.getValue();
+                // 始终发送队伍移除包，防止客户端内存泄漏（即使实体已不存在）
+                removeGlowColorPacket(player, prev.entityUuidString(), prev.color());
+                // 实体仍存活时才发送关闭发光包
                 Entity maybeEntity = serverLevel.getEntity(entityId);
                 if (maybeEntity != null && maybeEntity.isAlive()) {
                     sendPrivateGlowPacket(player, maybeEntity, false);
-                    removeGlowColorPacket(player, maybeEntity, entry.getValue());
                 }
             }
         }
@@ -1499,9 +1540,17 @@ public class DeathEventHandler {
      * 向玩家发送移除实体发光颜色队伍关联的数据包（仅从指定颜色队伍移除）。
      */
     private static void removeGlowColorPacket(ServerPlayer viewer, Entity target, ChatFormatting color) {
+        removeGlowColorPacket(viewer, target.getStringUUID(), color);
+    }
+
+    /**
+     * 向玩家发送移除实体发光颜色队伍关联的数据包（使用已缓存的 UUID 字符串）。
+     * 即使实体已不存在于服务端，只要有 UUID 字符串，就能正确清理客户端队伍列表。
+     */
+    private static void removeGlowColorPacket(ServerPlayer viewer, String entityUuidString, ChatFormatting color) {
         PlayerTeam team = GLOW_COLOR_TEAMS.get(color);
         if (team == null) return;
-        viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, target.getStringUUID(), ClientboundSetPlayerTeamPacket.Action.REMOVE));
+        viewer.connection.send(ClientboundSetPlayerTeamPacket.createPlayerPacket(team, entityUuidString, ClientboundSetPlayerTeamPacket.Action.REMOVE));
     }
 
     /** 清除指定玩家的所有私有高亮（关闭功能或玩家登出时调用）。 */
@@ -1511,16 +1560,19 @@ public class DeathEventHandler {
             return;
         }
 
-        Map<Integer, ChatFormatting> previous = PRIVATE_HIGHLIGHT_COLORS.remove(player.getUUID());
+        Map<Integer, HighlightEntry> previous = PRIVATE_HIGHLIGHT_COLORS.remove(player.getUUID());
         if (previous == null || previous.isEmpty()) {
             return;
         }
 
         for (var entry : previous.entrySet()) {
+            HighlightEntry hl = entry.getValue();
+            // 始终发送队伍移除包，防止客户端内存泄漏（即使实体已不存在）
+            removeGlowColorPacket(player, hl.entityUuidString(), hl.color());
+            // 实体仍存活时才发送关闭发光包
             Entity maybeEntity = serverLevel.getEntity(entry.getKey());
             if (maybeEntity != null && maybeEntity.isAlive()) {
                 sendPrivateGlowPacket(player, maybeEntity, false);
-                removeGlowColorPacket(player, maybeEntity, entry.getValue());
             }
         }
     }
@@ -1536,6 +1588,7 @@ public class DeathEventHandler {
             return;
         }
         tracked.remove(item.getId());
+        ENTITY_DIMENSIONS.remove(item.getId());
         if (tracked.isEmpty()) {
             OWNED_DEATH_DROP_IDS.remove(owner);
             OWNER_SCOREBOARD_NAMES.remove(owner);
@@ -1554,10 +1607,24 @@ public class DeathEventHandler {
         UUID playerId = player.getUUID();
         Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
         if (trackedEntityIds == null || trackedEntityIds.isEmpty()) return;
+        MinecraftServer server = player.getServer();
 
         List<Integer> stale = new ArrayList<>();
         for (Integer entityId : trackedEntityIds) {
-            Entity maybeEntity = serverLevel.getEntity(entityId);
+            // 跨维度处理：在实体实际所在维度中查找，而非仅限玩家当前维度
+            // 若 ENTITY_DIMENSIONS 中无记录（不应发生），视为在当前维度处理
+            ResourceKey<Level> entityDimension = ENTITY_DIMENSIONS.get(entityId);
+            ServerLevel entityLevel;
+            if (entityDimension == null || entityDimension.equals(serverLevel.dimension())) {
+                entityLevel = serverLevel;
+            } else {
+                entityLevel = server != null ? server.getLevel(entityDimension) : null;
+                if (entityLevel == null) {
+                    // 维度未加载，暂时跳过（不标记为失效）
+                    continue;
+                }
+            }
+            Entity maybeEntity = entityLevel.getEntity(entityId);
             if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()
                     || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
                 stale.add(entityId);
@@ -1565,6 +1632,9 @@ public class DeathEventHandler {
         }
         if (!stale.isEmpty()) {
             trackedEntityIds.removeAll(stale);
+            for (Integer staleId : stale) {
+                ENTITY_DIMENSIONS.remove(staleId);
+            }
             if (trackedEntityIds.isEmpty()) {
                 OWNED_DEATH_DROP_IDS.remove(playerId);
                 OWNER_SCOREBOARD_NAMES.remove(playerId);
@@ -1600,6 +1670,17 @@ public class DeathEventHandler {
     }
 
     // ── 配置便捷读取 ────────────────────────────────────────────
+
+    /**
+     * 更新高频事件中使用的配置缓存。
+     * 由 {@code ModConfigEvent.Loading} 和 {@code ModConfigEvent.Reloading} 触发调用，
+     * 避免在 {@link #onEntityTick} 等极高频事件中直接调用 {@code ConfigValue#get()}。
+     */
+    public static void onConfigLoaded() {
+        cachedVoidRecoveryEnabled = Config.COMMON.VOID_RECOVERY_ENABLED.get();
+        cachedHazardRecoveryEnabled = Config.COMMON.HAZARD_RECOVERY_ENABLED.get();
+        cachedVoidRecoveryMode = Config.COMMON.VOID_RECOVERY_MODE.get();
+    }
 
     private static int getPrivateHighlightIntervalTicks() {
         return Math.max(1, Config.COMMON.PRIVATE_HIGHLIGHT_SCAN_INTERVAL_TICKS.get());

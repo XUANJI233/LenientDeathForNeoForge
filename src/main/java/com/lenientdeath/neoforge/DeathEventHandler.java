@@ -121,6 +121,12 @@ public class DeathEventHandler {
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     /** Entity shared flags 中发光位的掩码。 */
     private static final byte GLOWING_FLAG_MASK = 0x40;
+    /**
+     * isValidRecoverySpot 内部复用的临时可变位置（仅服务端主线程调用，无并发风险）。
+     * 避免每次安全点检查都分配新的 BlockPos 对象，消除 GC 压力。
+     */
+    private static final BlockPos.MutableBlockPos TEMP_FLOOR_POS = new BlockPos.MutableBlockPos();
+    private static final BlockPos.MutableBlockPos TEMP_HEAD_POS = new BlockPos.MutableBlockPos();
 
     // ── 反射获取的访问器 ──────────────────────────────────────────
 
@@ -278,8 +284,10 @@ public class DeathEventHandler {
                 refreshPrivateHighlights(player);
             }
         } else if (player.tickCount % privateHighlightIntervalTicks == 0) {
-            pruneOwnedDropTracking(player);
             clearPrivateHighlights(player);
+            // 高亮功能关闭时 refreshPrivateHighlights 不会被调用，需要手动清理已消失的掉落物 ID
+            // 避免玩家多次死亡后 OWNED_DEATH_DROP_IDS 无限膨胀
+            cleanupStaleOwnedDropIds(player);
         }
 
         // 只有玩家站在地面上，且不是观察者模式时，才记录安全点历史
@@ -732,10 +740,7 @@ public class DeathEventHandler {
      * @return 验证后的可用位置，均不可用则返回 null
      */
     private static BlockPos validatePreferredSafePos(ServerLevel level, ItemEntity item, BlockPos preferredPos) {
-        BlockPos.MutableBlockPos floorPos = new BlockPos.MutableBlockPos();
-        BlockPos.MutableBlockPos headPos = new BlockPos.MutableBlockPos();
-
-        if (isValidRecoverySpot(level, item, preferredPos, floorPos, headPos)) {
+        if (isValidRecoverySpot(level, item, preferredPos)) {
             return preferredPos;
         }
 
@@ -744,7 +749,7 @@ public class DeathEventHandler {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     BlockPos candidate = preferredPos.offset(dx, 0, dz);
-                    if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
+                    if (isValidRecoverySpot(level, item, candidate)) {
                         return candidate;
                     }
                 }
@@ -775,8 +780,6 @@ public class DeathEventHandler {
 
         // 使用 MutableBlockPos 避免在多重循环中大量创建 BlockPos 对象
         BlockPos.MutableBlockPos candidate = new BlockPos.MutableBlockPos();
-        BlockPos.MutableBlockPos floorPos = new BlockPos.MutableBlockPos();
-        BlockPos.MutableBlockPos headPos = new BlockPos.MutableBlockPos();
 
         // 由中心向外扩展搜索，每次只检查半径为 r 的外环
         for (int r = 0; r <= horizontalRadius; r++) {
@@ -813,7 +816,7 @@ public class DeathEventHandler {
                                 return best;
                             }
                             candidate.set(center.getX() + dx, yUp, center.getZ() + dz);
-                            if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
+                            if (isValidRecoverySpot(level, item, candidate)) {
                                 double distanceSq = candidate.distSqr(center);
                                 if (distanceSq < bestDistanceSq) {
                                     bestDistanceSq = distanceSq;
@@ -833,7 +836,7 @@ public class DeathEventHandler {
                                 return best;
                             }
                             candidate.set(center.getX() + dx, yDown, center.getZ() + dz);
-                            if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
+                            if (isValidRecoverySpot(level, item, candidate)) {
                                 double distanceSq = candidate.distSqr(center);
                                 if (distanceSq < bestDistanceSq) {
                                     bestDistanceSq = distanceSq;
@@ -856,9 +859,9 @@ public class DeathEventHandler {
      *
      * @param feetPos 物品将被放置的位置（地板上方的空气方块）
      */
-    private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos, BlockPos.MutableBlockPos floorPos, BlockPos.MutableBlockPos headPos) {
-        floorPos.set(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
-        headPos.set(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
+    private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
+        BlockPos floorPos = TEMP_FLOOR_POS.set(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
+        BlockPos headPos = TEMP_HEAD_POS.set(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
 
         var floor = level.getBlockState(floorPos);
         var feet = level.getBlockState(feetPos);
@@ -1522,37 +1525,6 @@ public class DeathEventHandler {
         }
     }
 
-    /**
-     * 在高亮功能关闭时，按现有追踪索引主动清理已失效的掉落实体 ID。
-     */
-    private static void pruneOwnedDropTracking(ServerPlayer player) {
-        if (!(player.level() instanceof ServerLevel serverLevel)) {
-            return;
-        }
-
-        UUID playerId = player.getUUID();
-        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
-        if (trackedEntityIds == null || trackedEntityIds.isEmpty()) {
-            return;
-        }
-
-        List<Integer> staleTrackedIds = new ArrayList<>();
-        for (Integer entityId : trackedEntityIds) {
-            Entity maybeEntity = serverLevel.getEntity(entityId);
-            if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive() || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
-                staleTrackedIds.add(entityId);
-            }
-        }
-
-        if (!staleTrackedIds.isEmpty()) {
-            trackedEntityIds.removeAll(staleTrackedIds);
-            if (trackedEntityIds.isEmpty()) {
-                OWNED_DEATH_DROP_IDS.remove(playerId);
-                OWNER_SCOREBOARD_NAMES.remove(playerId);
-            }
-        }
-    }
-
     /** 从归属索引中移除已失效/被拾取的掉落物实体 ID。 */
     private static void untrackOwnedDropEntity(ItemEntity item) {
         if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
@@ -1567,6 +1539,36 @@ public class DeathEventHandler {
         if (tracked.isEmpty()) {
             OWNED_DEATH_DROP_IDS.remove(owner);
             OWNER_SCOREBOARD_NAMES.remove(owner);
+        }
+    }
+
+    /**
+     * 清理指定玩家的已失效掉落物实体 ID（高亮功能关闭时的内存泄漏防护）。
+     * <p>
+     * 当 ITEM_GLOW_ENABLED 为 false 时，{@link #refreshPrivateHighlights} 不会被调用，
+     * 因此无法依赖其扫描逻辑清除已消失实体的 ID。此方法填补这一清理路径的缺失，
+     * 防止玩家多次死亡后 OWNED_DEATH_DROP_IDS 无限膨胀。
+     */
+    private static void cleanupStaleOwnedDropIds(ServerPlayer player) {
+        if (!(player.level() instanceof ServerLevel serverLevel)) return;
+        UUID playerId = player.getUUID();
+        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        if (trackedEntityIds == null || trackedEntityIds.isEmpty()) return;
+
+        List<Integer> stale = new ArrayList<>();
+        for (Integer entityId : trackedEntityIds) {
+            Entity maybeEntity = serverLevel.getEntity(entityId);
+            if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()
+                    || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+                stale.add(entityId);
+            }
+        }
+        if (!stale.isEmpty()) {
+            trackedEntityIds.removeAll(stale);
+            if (trackedEntityIds.isEmpty()) {
+                OWNED_DEATH_DROP_IDS.remove(playerId);
+                OWNER_SCOREBOARD_NAMES.remove(playerId);
+            }
         }
     }
 

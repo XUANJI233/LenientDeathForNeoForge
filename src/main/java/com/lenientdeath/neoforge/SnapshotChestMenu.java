@@ -403,7 +403,7 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
             return;
         }
 
-        // 底部玩家背包区域交给父类处理，保持原生点击/移动逻辑。
+        // 底部玩家背包区域：转交父类正常处理，保持客户端与服务端状态同步，避免幽灵物品
         super.clicked(slotId, button, clickType, player);
     }
 

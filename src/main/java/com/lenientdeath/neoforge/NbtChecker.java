@@ -21,6 +21,7 @@ public class NbtChecker {
         if (tag == null) return null;
 
         var rawTag = tag.getUnsafe();
-        return rawTag != null && rawTag.getBoolean(config.NBT_KEY.get());
+        if (rawTag == null) return null;
+        return rawTag.getBoolean(config.NBT_KEY.get());
     }
 }

@@ -26,6 +26,7 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.common.util.TriState;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
@@ -196,6 +197,12 @@ public class DeathEventHandler {
     private static final Map<UUID, Set<Integer>> OWNED_DEATH_DROP_IDS = new ConcurrentHashMap<>();
     /** 每个已追踪的掉落实体 ID 所在的维度键，用于跨维度正确查找实体。 */
     private static final Map<Integer, ResourceKey<Level>> ENTITY_DIMENSIONS = new ConcurrentHashMap<>();
+    /**
+     * ALL_DROPS 模式专用：所有当前已加载的 ItemEntity 实体 ID 及其维度。
+     * 由 EntityJoinLevelEvent 填充，由 EntityLeaveLevelEvent 清除，
+     * 在 ServerTickEvent 中迭代以执行虚空/危险恢复，避免低效的全局 EntityTickEvent。
+     */
+    private static final Map<Integer, ResourceKey<Level>> ALL_ITEM_ENTITY_DIMENSIONS = new ConcurrentHashMap<>();
     /** 归属玩家 UUID -> 记分板名称缓存，避免离线时触发 ProfileCache 查询。 */
     private static final Map<UUID, String> OWNER_SCOREBOARD_NAMES = new ConcurrentHashMap<>();
     /** 已向哪些玩家发送过发光颜色队伍创建包。 */
@@ -573,9 +580,14 @@ public class DeathEventHandler {
     }
 
     /**
-     * 服务器 tick 处理：仅在 DEATH_DROPS_ONLY 模式下，遍历所有已追踪的死亡掉落实体并执行
-     * 虚空/危险恢复。相比全局 EntityTickEvent，此方式只迭代数十个死亡掉落物，而非
-     * 服务器上可能存在的数千/万个 ItemEntity，大幅降低主线程 CPU 开销。
+     * 服务器 tick 处理：遍历所有已追踪的 ItemEntity 并执行虚空/危险恢复。
+     * <ul>
+     *   <li>DEATH_DROPS_ONLY 模式：仅迭代 {@code ENTITY_DIMENSIONS}（死亡掉落物，数十个），
+     *       开销极低。</li>
+     *   <li>ALL_DROPS 模式：迭代 {@code ALL_ITEM_ENTITY_DIMENSIONS}（全部加载中的 ItemEntity），
+     *       由 EntityJoinLevelEvent/EntityLeaveLevelEvent 维护，避免每实体每 tick 的
+     *       EventBus 派发开销（EntityTickEvent.Pre 反模式）。</li>
+     * </ul>
      */
     @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
@@ -584,50 +596,59 @@ public class DeathEventHandler {
         boolean hazardRecoveryEnabled = cachedHazardRecoveryEnabled;
         if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
 
-        // 此处仅处理 DEATH_DROPS_ONLY 模式；ALL_DROPS 模式由 onEntityTick 负责
-        if (cachedVoidRecoveryMode != Config.VoidRecoveryMode.DEATH_DROPS_ONLY) return;
-
-        if (ENTITY_DIMENSIONS.isEmpty()) return;
-
         MinecraftServer server = event.getServer();
-        // Snapshot keySet to avoid ConcurrentModificationException if untrackOwnedDropEntity
-        // is called during iteration (e.g. from onEntityLeaveLevel callbacks fired mid-tick).
-        Integer[] entityIds = ENTITY_DIMENSIONS.keySet().toArray(Integer[]::new);
-        for (Integer entityId : entityIds) {
-            ResourceKey<Level> dimension = ENTITY_DIMENSIONS.get(entityId);
-            if (dimension == null) continue;
-            ServerLevel level = server.getLevel(dimension);
-            if (level == null) continue;
 
-            Entity maybeEntity = level.getEntity(entityId);
-            if (!(maybeEntity instanceof ItemEntity item)) continue;
-            // 在追踪的 ItemEntity 上执行恢复检查（无需额外的 DEATH_DROPS_ONLY 过滤，
-            // ENTITY_DIMENSIONS 中仅存储死亡掉落物）
-            processItemRecovery(item, level, voidRecoveryEnabled, hazardRecoveryEnabled);
+        if (cachedVoidRecoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY) {
+            // DEATH_DROPS_ONLY 模式：仅迭代死亡掉落物追踪表
+            if (ENTITY_DIMENSIONS.isEmpty()) return;
+
+            // Snapshot keySet to avoid ConcurrentModificationException if untrackOwnedDropEntity
+            // is called during iteration (e.g. from onEntityLeaveLevel callbacks fired mid-tick).
+            Integer[] entityIds = ENTITY_DIMENSIONS.keySet().toArray(Integer[]::new);
+            for (Integer entityId : entityIds) {
+                ResourceKey<Level> dimension = ENTITY_DIMENSIONS.get(entityId);
+                if (dimension == null) continue;
+                ServerLevel level = server.getLevel(dimension);
+                if (level == null) continue;
+
+                Entity maybeEntity = level.getEntity(entityId);
+                if (!(maybeEntity instanceof ItemEntity item)) continue;
+                // 在追踪的 ItemEntity 上执行恢复检查（无需额外的 DEATH_DROPS_ONLY 过滤，
+                // ENTITY_DIMENSIONS 中仅存储死亡掉落物）
+                processItemRecovery(item, level, voidRecoveryEnabled, hazardRecoveryEnabled);
+            }
+        } else {
+            // ALL_DROPS 模式：迭代 EntityJoinLevelEvent/EntityLeaveLevelEvent 维护的全量表，
+            // 比全局 EntityTickEvent.Pre 每实体每 tick 派发更高效（单次 EventBus 调用）
+            if (ALL_ITEM_ENTITY_DIMENSIONS.isEmpty()) return;
+
+            Integer[] entityIds = ALL_ITEM_ENTITY_DIMENSIONS.keySet().toArray(Integer[]::new);
+            for (Integer entityId : entityIds) {
+                ResourceKey<Level> dimension = ALL_ITEM_ENTITY_DIMENSIONS.get(entityId);
+                if (dimension == null) continue;
+                ServerLevel level = server.getLevel(dimension);
+                if (level == null) continue;
+
+                Entity maybeEntity = level.getEntity(entityId);
+                if (!(maybeEntity instanceof ItemEntity item)) continue;
+                processItemRecovery(item, level, voidRecoveryEnabled, hazardRecoveryEnabled);
+            }
         }
     }
 
     /**
-     * 实体 tick 前处理：仅在 ALL_DROPS 模式下对 ItemEntity 执行虚空/危险恢复。
+     * 实体 tick 前处理（已停用）。
      * <p>
-     * DEATH_DROPS_ONLY 模式（默认）下此方法立即返回，恢复逻辑由
-     * {@link #onServerTick} 负责，以避免对全服所有掉落物进行每 tick 扫描。
+     * ALL_DROPS 模式的虚空/危险恢复已迁移到 {@link #onServerTick}，
+     * 使用 EntityJoinLevelEvent/EntityLeaveLevelEvent 维护的 {@code ALL_ITEM_ENTITY_DIMENSIONS}
+     * 进行迭代，避免对全服所有实体注册全局 EntityTickEvent.Pre 的性能反模式。
+     * <p>
+     * 保留此方法签名以方便未来参考，但不再注册到事件总线。
      */
-    @SubscribeEvent
     @SuppressWarnings("ConstantConditions")
-    public static void onEntityTick(EntityTickEvent.Pre event) {
-        // DEATH_DROPS_ONLY 模式由 onServerTick 处理，此处退出以节省全局实体 tick 开销
-        if (cachedVoidRecoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY) return;
-
-        if (!(event.getEntity() instanceof ItemEntity item)) return;
-        if (item.level().isClientSide) return;
-
-        boolean voidRecoveryEnabled = cachedVoidRecoveryEnabled;
-        boolean hazardRecoveryEnabled = cachedHazardRecoveryEnabled;
-        if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
-
-        if (!(item.level() instanceof ServerLevel serverLevel)) return;
-        processItemRecovery(item, serverLevel, voidRecoveryEnabled, hazardRecoveryEnabled);
+    static void onEntityTick(EntityTickEvent.Pre event) {
+        // Intentionally not annotated with @SubscribeEvent.
+        // ALL_DROPS recovery is now handled in onServerTick via ALL_ITEM_ENTITY_DIMENSIONS.
     }
 
     /**
@@ -706,15 +727,44 @@ public class DeathEventHandler {
     }
 
     /**
-     * 实体离开世界时（消散/销毁），从追踪数据结构中清除对应的死亡掉落实体 ID。
+     * 实体加入世界时，为死亡掉落物恢复追踪（区块重载后实体 ID 变化），
+     * 并更新 ALL_DROPS 模式所需的全量 ItemEntity 追踪表。
      * <p>
-     * 配合对 null 结果的保守处理策略（区块卸载时 getEntity 返回 null，
-     * 但实体并未真正消失），此事件是检测实体永久消失的可靠来源。
+     * 死亡掉落物在区块卸载时由 {@link #onEntityLeaveLevel} 从追踪中移除，
+     * 区块重载后实体从 NBT 中恢复并获得新 ID，此处重新建立追踪，
+     * 使私有高亮和 DEATH_DROPS_ONLY 虚空恢复对回程玩家正常工作。
+     */
+    @SubscribeEvent
+    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
+        if (!(event.getEntity() instanceof ItemEntity item)) return;
+        if (event.getLevel().isClientSide()) return;
+
+        ResourceKey<Level> dimension = event.getLevel().dimension();
+
+        // ALL_DROPS 模式：追踪全部 ItemEntity，供 ServerTickEvent 迭代
+        ALL_ITEM_ENTITY_DIMENSIONS.put(item.getId(), dimension);
+
+        // 死亡掉落追踪：仅对携带 IS_DEATH_DROP 标记且有归属玩家 UUID 的实体处理
+        if (!ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)) return;
+        if (!ModEntityData.get(item, ModAttachments.IS_DEATH_DROP)) return;
+        if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) return;
+
+        UUID ownerId = ModEntityData.get(item, ModAttachments.OWNER_UUID);
+        OWNED_DEATH_DROP_IDS.computeIfAbsent(ownerId, ignored -> ConcurrentHashMap.newKeySet()).add(item.getId());
+        ENTITY_DIMENSIONS.put(item.getId(), dimension);
+    }
+
+    /**
+     * 实体离开世界时（消散/区块卸载/销毁），从所有追踪数据结构中清除对应的实体 ID。
+     * <p>
+     * 对于区块卸载（UNLOADED_TO_CHUNK / UNLOADED_WITH_PLAYER），此处同样移除追踪 ID；
+     * 区块重载后 {@link #onEntityJoinLevel} 将以新 ID 重新建立追踪。
      */
     @SubscribeEvent
     public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
         if (!(event.getEntity() instanceof ItemEntity item)) return;
         if (event.getLevel().isClientSide()) return;
+        ALL_ITEM_ENTITY_DIMENSIONS.remove(item.getId());
         untrackOwnedDropEntity(item);
     }
 
@@ -1288,6 +1338,7 @@ public class DeathEventHandler {
         GLOW_TEAMS_INITIALIZED.clear();
         RECOVERY_TARGET_CACHE.clear();
         ENTITY_DIMENSIONS.clear();
+        ALL_ITEM_ENTITY_DIMENSIONS.clear();
         recoverySearchBudgetTick = Long.MIN_VALUE;
         expensiveRecoverySearchesThisTick.set(0);
     }
@@ -1770,22 +1821,32 @@ public class DeathEventHandler {
         }
     }
 
-    /** 从归属索引中移除已失效/被拾取的掉落物实体 ID。 */
+    /**
+     * 从归属索引中移除已失效/被拾取的掉落物实体 ID。
+     * <p>
+     * 使用 {@link ConcurrentHashMap#computeIfPresent} 原子地执行"移除元素 → 判断是否为空 → 移除空 Set"
+     * 的复合操作，消除以下竞态条件：线程 A 判断 Set 为空准备移除时，线程 B 向同一 Set
+     * 加入新 ID，导致新 ID 在 OWNED_DEATH_DROP_IDS 中的引用被线程 A 一并删除，
+     * 而 ENTITY_DIMENSIONS 中的记录却永久残留（内存泄漏）。
+     */
     private static void untrackOwnedDropEntity(ItemEntity item) {
         if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
             return;
         }
         UUID owner = ModEntityData.get(item, ModAttachments.OWNER_UUID);
-        Set<Integer> tracked = OWNED_DEATH_DROP_IDS.get(owner);
-        if (tracked == null) {
-            return;
-        }
-        tracked.remove(item.getId());
+        // Remove from ENTITY_DIMENSIONS first; this is safe because ENTITY_DIMENSIONS is keyed by
+        // entity ID (not shared with the computeIfPresent bucket lock on OWNED_DEATH_DROP_IDS).
         ENTITY_DIMENSIONS.remove(item.getId());
-        if (tracked.isEmpty()) {
-            OWNED_DEATH_DROP_IDS.remove(owner);
-            OWNER_SCOREBOARD_NAMES.remove(owner);
-        }
+        // Atomically remove the entity ID from the tracked set and, if the set becomes empty,
+        // remove the entire entry from OWNED_DEATH_DROP_IDS and clean up the scoreboard name cache.
+        OWNED_DEATH_DROP_IDS.computeIfPresent(owner, (k, tracked) -> {
+            tracked.remove(item.getId());
+            if (tracked.isEmpty()) {
+                OWNER_SCOREBOARD_NAMES.remove(k);
+                return null; // returning null removes the entry from OWNED_DEATH_DROP_IDS
+            }
+            return tracked;
+        });
     }
 
     /**

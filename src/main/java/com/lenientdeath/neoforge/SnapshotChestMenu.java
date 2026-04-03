@@ -60,7 +60,12 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
         this.session = session;
 
         for (int i = 0; i < CHEST_SIZE; i++) {
-            addSlot(new Slot(chest, i, 8 + (i % 9) * 18, 18 + (i / 9) * 18));
+            addSlot(new Slot(chest, i, 8 + (i % 9) * 18, 18 + (i / 9) * 18) {
+                @Override
+                public boolean mayPickup(Player player) { return false; }
+                @Override
+                public boolean mayPlace(ItemStack stack) { return false; }
+            });
         }
 
         for (int row = 0; row < 3; ++row) {
@@ -394,16 +399,18 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
 
     @Override
     public void clicked(int slotId, int button, ClickType clickType, Player player) {
-        // 顶部 6x9 仅作 UI 按钮和展示，禁止拿取；点击按钮触发页面动作
-        if (slotId >= 0 && slotId < CHEST_SIZE) {
+        // 顶部 6x9 仅作 UI 按钮和展示：触发动作后立即返回（render() 内已调用 broadcastChanges()）；
+        // 无动作或非 PICKUP 类型时交由父类处理，父类将安全地执行空操作（mayPickup/mayPlace 均返回 false），
+        // 同时发送游标同步包，防止幽灵物品出现。
+        if (slotId >= 0 && slotId < CHEST_SIZE && clickType == ClickType.PICKUP) {
             Runnable action = actions.get(slotId);
-            if (action != null && clickType == ClickType.PICKUP) {
+            if (action != null) {
                 action.run();
+                return;
             }
-            return;
         }
 
-        // 底部玩家背包区域：转交父类正常处理，保持客户端与服务端状态同步，避免幽灵物品
+        // 底部玩家背包区域及无动作的展示槽：转交父类正常处理，保持客户端与服务端状态同步，避免幽灵物品
         super.clicked(slotId, button, clickType, player);
     }
 

@@ -56,6 +56,7 @@ public class LenientDeathNeoForge {
             return;
         }
         ManualAllowAndBlocklist.INSTANCE.refreshItems();
+        DeathEventHandler.onConfigLoaded();
     }
 
     /**

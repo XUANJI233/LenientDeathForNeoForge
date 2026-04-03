@@ -278,13 +278,34 @@ public final class EventUtils {
                 } else {
                     final MethodType samType = MethodType.methodType(void.class, Object.class, Object.class);
                     try {
+                        // Build the dynamicMethodType (instantiatedMethodType) for LambdaMetafactory.
+                        // Requirements:
+                        //   1. Each param type must be a subtype of the SAM's corresponding Object param.
+                        //   2. The receiver (param 0) must be the concrete declaring class, NOT Object,
+                        //      because LambdaMetafactory checks that the receiver is a subtype of the
+                        //      implementation type's receiver and cannot upcast to Object.
+                        //   3. Primitive parameter types (e.g. boolean) must be boxed (e.g. Boolean)
+                        //      because primitives are not subtypes of Object in the type system.
+                        //
+                        // Failure to meet these constraints causes LambdaConversionException at call-site
+                        // construction time, and the original code used samType (Object, Object) for both
+                        // erased and instantiated types, which fails for any method with a primitive arg.
+                        final Class<?>[] rawParams = m.getParameterTypes();
+                        final Class<?>[] dynParams = new Class<?>[rawParams.length];
+                        for (int i = 0; i < rawParams.length; i++) {
+                            // Box primitives: MethodType.methodType(prim).wrap().returnType() → wrapper class
+                            dynParams[i] = rawParams[i].isPrimitive()
+                                    ? MethodType.methodType(rawParams[i]).wrap().returnType()
+                                    : rawParams[i];
+                        }
+                        final MethodType dynamicMethodType = MethodType.methodType(void.class, m.getDeclaringClass(), dynParams);
                         final CallSite site = LambdaMetafactory.metafactory(
                                 lookup,
                                 "invoke",
                                 MethodType.methodType(Invoker.class),
                                 samType,
                                 mh,
-                                samType);
+                                dynamicMethodType);
                         final MethodHandle factory = site.getTarget();
                         inv = (Invoker) factory.invoke();
                     } catch (final Throwable lmfe) {

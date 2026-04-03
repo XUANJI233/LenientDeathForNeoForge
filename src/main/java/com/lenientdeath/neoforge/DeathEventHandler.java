@@ -1363,29 +1363,33 @@ public class DeathEventHandler {
         Config.GlowVisibility visibility = Config.COMMON.GLOW_VISIBILITY.get();
         // 缓存 owner -> shouldShow 结果，避免同一归属者的多个掉落物重复查询队伍/离线缓存
         Map<UUID, Boolean> shouldShowCache = new HashMap<>();
-        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
-        List<Integer> staleTrackedIds = new ArrayList<>();
         double scanRadiusSq = scanRadius * scanRadius;
 
         int processed = 0;
-        if (trackedEntityIds != null) {
-            for (Integer entityId : trackedEntityIds) {
+
+        // 第一轮：处理观察者自己拥有的掉落物（同时做追踪清理）
+        Set<Integer> ownTrackedIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        List<Integer> staleOwnIds = null;
+        if (ownTrackedIds != null) {
+            for (Integer entityId : ownTrackedIds) {
                 if (processed >= maxScannedEntities) {
                     break;
                 }
 
                 Entity maybeEntity = serverLevel.getEntity(entityId);
                 if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()) {
-                    staleTrackedIds.add(entityId);
-                    continue;
-                }
-
-                if (item.distanceToSqr(player) > scanRadiusSq) {
+                    if (staleOwnIds == null) staleOwnIds = new ArrayList<>();
+                    staleOwnIds.add(entityId);
                     continue;
                 }
 
                 if (!ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
-                    staleTrackedIds.add(entityId);
+                    if (staleOwnIds == null) staleOwnIds = new ArrayList<>();
+                    staleOwnIds.add(entityId);
+                    continue;
+                }
+
+                if (item.distanceToSqr(player) > scanRadiusSq) {
                     continue;
                 }
 
@@ -1412,13 +1416,51 @@ public class DeathEventHandler {
                     // 颜色相同则无需重复发送
                 }
             }
+
+            if (staleOwnIds != null) {
+                ownTrackedIds.removeAll(staleOwnIds);
+                if (ownTrackedIds.isEmpty()) {
+                    OWNED_DEATH_DROP_IDS.remove(playerId);
+                    OWNER_SCOREBOARD_NAMES.remove(playerId);
+                }
+            }
         }
 
-        if (trackedEntityIds != null && !staleTrackedIds.isEmpty()) {
-            trackedEntityIds.removeAll(staleTrackedIds);
-            if (trackedEntityIds.isEmpty()) {
-                OWNED_DEATH_DROP_IDS.remove(playerId);
-                OWNER_SCOREBOARD_NAMES.remove(playerId);
+        // 第二轮：对 EVERYONE / DEAD_PLAYER_AND_TEAM 模式额外扫描其他玩家的掉落物。
+        // DEAD_PLAYER 模式只有死亡玩家本人才能看到自己的掉落物，无需扫描其他玩家。
+        if ((visibility == Config.GlowVisibility.EVERYONE || visibility == Config.GlowVisibility.DEAD_PLAYER_AND_TEAM)
+                && processed < maxScannedEntities) {
+            outer:
+            for (var ownerEntry : OWNED_DEATH_DROP_IDS.entrySet()) {
+                UUID ownerId = ownerEntry.getKey();
+                if (ownerId.equals(playerId)) continue; // 已在第一轮处理
+
+                // 提前判断该归属者的物品是否应展示给观察者，避免遍历物品后再决定跳过
+                boolean shouldShow = shouldShowCache.computeIfAbsent(ownerId,
+                        o -> shouldShowGlowTo(player, o, visibility, serverLevel));
+                if (!shouldShow) continue;
+
+                for (Integer entityId : ownerEntry.getValue()) {
+                    if (processed >= maxScannedEntities) break outer;
+
+                    Entity maybeEntity = serverLevel.getEntity(entityId);
+                    // 不修改其他玩家的追踪集，由其自身的扫描周期负责清理
+                    if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()) continue;
+                    if (item.distanceToSqr(player) > scanRadiusSq) continue;
+
+                    processed++;
+                    ChatFormatting color = getGlowColorForItem(item);
+                    current.put(item.getId(), color);
+
+                    ChatFormatting prevColor = previous.get(item.getId());
+                    if (prevColor == null) {
+                        sendPrivateGlowPacket(player, item, true);
+                        sendGlowColorPacket(player, item, color);
+                    } else if (prevColor != color) {
+                        removeGlowColorPacket(player, item, prevColor);
+                        sendGlowColorPacket(player, item, color);
+                    }
+                }
             }
         }
 
@@ -1536,15 +1578,16 @@ public class DeathEventHandler {
             return;
         }
 
-        List<Integer> staleTrackedIds = new ArrayList<>();
+        List<Integer> staleTrackedIds = null;
         for (Integer entityId : trackedEntityIds) {
             Entity maybeEntity = serverLevel.getEntity(entityId);
             if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive() || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+                if (staleTrackedIds == null) staleTrackedIds = new ArrayList<>();
                 staleTrackedIds.add(entityId);
             }
         }
 
-        if (!staleTrackedIds.isEmpty()) {
+        if (staleTrackedIds != null) {
             trackedEntityIds.removeAll(staleTrackedIds);
             if (trackedEntityIds.isEmpty()) {
                 OWNED_DEATH_DROP_IDS.remove(playerId);

@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -137,12 +138,7 @@ public class DeathEventHandler {
     private static final double TELEPORT_SPREAD_SCALE = 0.03;
     /** Small upward velocity applied on teleport so items arc gently away from the floor surface. */
     private static final double TELEPORT_UPWARD_VELOCITY = 0.05;
-    /**
-     * isValidRecoverySpot 内部复用的临时可变位置（仅服务端主线程调用，无并发风险）。
-     * 避免每次安全点检查都分配新的 BlockPos 对象，消除 GC 压力。
-     */
-    private static final BlockPos.MutableBlockPos TEMP_FLOOR_POS = new BlockPos.MutableBlockPos();
-    private static final BlockPos.MutableBlockPos TEMP_HEAD_POS = new BlockPos.MutableBlockPos();
+
 
     // ── 反射获取的访问器 ──────────────────────────────────────────
 
@@ -211,8 +207,8 @@ public class DeathEventHandler {
             });
     /** 当前统计窗口的游戏时间（用于按 tick 重置昂贵搜索计数）。 */
     private static volatile long recoverySearchBudgetTick = Long.MIN_VALUE;
-    /** 当前 tick 已执行的昂贵搜索次数。 */
-    private static volatile int expensiveRecoverySearchesThisTick = 0;
+    /** 当前 tick 已执行的昂贵搜索次数（AtomicInteger 保证 ++ 操作的原子性）。 */
+    private static final AtomicInteger expensiveRecoverySearchesThisTick = new AtomicInteger(0);
 
     @SuppressWarnings("unchecked")
     private static EntityDataAccessor<Byte> resolveSharedFlagsAccessor() {
@@ -571,31 +567,12 @@ public class DeathEventHandler {
         
         if (!voidRecoveryEnabled && !hazardRecoveryEnabled) return;
 
-        Config.VoidRecoveryMode recoveryMode = cachedVoidRecoveryMode;
-        boolean isDeathDrop = ModEntityData.has(item, ModAttachments.IS_DEATH_DROP) 
-                && ModEntityData.get(item, ModAttachments.IS_DEATH_DROP);
-        
-        // 根据模式过滤非死亡掉落物
-        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY && !isDeathDrop) {
-            if (isVoidRecoveryDebugEnabled()) {
-                LOGGER.info("[LenientDeath][Recovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
-                        item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
-            }
-            return;
-        }
-
-        // 检查是否刚刚恢复过（避免同一tick重复处理）
-        // 使用恢复时的tick记录，仅跳过同一tick内的重复触发
-        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
-            int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
-            if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
-                return;
-            }
-        }
-
+        // ── Step 1: Cheap condition checks (no attachment lookups) ───────────────────────────
+        // These are simple arithmetic/flag comparisons; perform them first to return quickly
+        // for the overwhelming majority of item entities that are in a safe state.
         var lvl = item.level();
         String recoveryReason = null;
-        
+
         // 检查虚空
         if (voidRecoveryEnabled) {
             double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
@@ -612,7 +589,8 @@ public class DeathEventHandler {
                 recoveryReason = item.isInLava() ? "lava" : "fire";
             }
         }
-        
+
+        // Early exit for safe items — no attachment/capability lookups performed
         if (recoveryReason == null) {
             if (isVoidRecoveryDebugEnabled() && voidRecoveryEnabled) {
                 double triggerY = getVoidTriggerY(lvl.getMinBuildHeight());
@@ -620,6 +598,33 @@ public class DeathEventHandler {
                         item.getId(), triggerY, item.getY());
             }
             return;
+        }
+
+        // ── Step 2: Attachment lookups (only reached when item needs recovery) ─────────────
+        // Performing these after the condition check avoids querying the attachment/capability
+        // map for every item entity on every tick in DEATH_DROPS_ONLY mode.
+        Config.VoidRecoveryMode recoveryMode = cachedVoidRecoveryMode;
+
+        // 根据模式过滤非死亡掉落物
+        if (recoveryMode == Config.VoidRecoveryMode.DEATH_DROPS_ONLY) {
+            boolean isDeathDrop = ModEntityData.has(item, ModAttachments.IS_DEATH_DROP)
+                    && ModEntityData.get(item, ModAttachments.IS_DEATH_DROP);
+            if (!isDeathDrop) {
+                if (isVoidRecoveryDebugEnabled()) {
+                    LOGGER.info("[LenientDeath][Recovery] Skip item {} mode={} reason=not_death_drop at ({}, {}, {})",
+                            item.getId(), recoveryMode, item.getX(), item.getY(), item.getZ());
+                }
+                return;
+            }
+        }
+
+        // 检查是否刚刚恢复过（避免同一tick重复处理）
+        // 使用恢复时的tick记录，仅跳过同一tick内的重复触发
+        if (ModEntityData.has(item, ModAttachments.VOID_RECOVERED)) {
+            int recoveredAtTick = ModEntityData.get(item, ModAttachments.VOID_RECOVERED);
+            if (recoveredAtTick >= 0 && item.tickCount - recoveredAtTick < 2) {
+                return;
+            }
         }
 
         // 限流检查
@@ -749,12 +754,9 @@ public class DeathEventHandler {
 
         if (recoverySearchBudgetTick != gameTime) {
             recoverySearchBudgetTick = gameTime;
-            expensiveRecoverySearchesThisTick = 0;
+            expensiveRecoverySearchesThisTick.set(0);
         }
-        boolean allowExpensiveSearch = expensiveRecoverySearchesThisTick < MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK;
-        if (allowExpensiveSearch) {
-            expensiveRecoverySearchesThisTick++;
-        }
+        boolean allowExpensiveSearch = expensiveRecoverySearchesThisTick.getAndIncrement() < MAX_EXPENSIVE_RECOVERY_SEARCHES_PER_TICK;
 
         RecoveryTarget resolved = resolveRecoveryTarget(level, item, allowExpensiveSearch);
         RECOVERY_TARGET_CACHE.put(key, new RecoveryTargetCacheValue(gameTime, resolved));
@@ -890,8 +892,17 @@ public class DeathEventHandler {
      * @param feetPos 物品将被放置的位置（地板上方的空气方块）
      */
     private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
-        BlockPos floorPos = TEMP_FLOOR_POS.set(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
-        BlockPos headPos = TEMP_HEAD_POS.set(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
+        // Guard: only query block states for loaded chunks to prevent synchronous chunk loading
+        // on the main thread. All three positions (floor/feet/head) share the same XZ chunk,
+        // so a single isLoaded check on feetPos is sufficient.
+        if (!level.isLoaded(feetPos)) {
+            return false;
+        }
+
+        // Use local MutableBlockPos instead of shared statics for thread safety (Folia compatibility)
+        // and to eliminate re-entrancy risk if getBlockState ever triggers callbacks.
+        BlockPos.MutableBlockPos floorPos = new BlockPos.MutableBlockPos(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
+        BlockPos.MutableBlockPos headPos = new BlockPos.MutableBlockPos(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
 
         var floor = level.getBlockState(floorPos);
         var feet = level.getBlockState(feetPos);
@@ -1151,17 +1162,12 @@ public class DeathEventHandler {
         DEATH_DROP_SNAPSHOTS.remove(uuid);
         NEXT_DEATH_DROP_SNAPSHOT_ID.remove(uuid);
         PENDING_SNAPSHOT_RESTORES.remove(uuid);
-        // Clean up ENTITY_DIMENSIONS for all drop IDs the player owned.
-        // Without this, every entity ID that was tracked for the logging-out player
-        // becomes an orphaned entry in ENTITY_DIMENSIONS that is never removed until
-        // the server restarts, causing an unbounded memory leak over long sessions.
-        Set<Integer> ownedIds = OWNED_DEATH_DROP_IDS.remove(uuid);
-        if (ownedIds != null) {
-            for (Integer entityId : ownedIds) {
-                ENTITY_DIMENSIONS.remove(entityId);
-            }
-        }
-        OWNER_SCOREBOARD_NAMES.remove(uuid);
+        // Intentionally NOT clearing OWNED_DEATH_DROP_IDS, ENTITY_DIMENSIONS, or
+        // OWNER_SCOREBOARD_NAMES on logout: the death-drop item entities still exist in the
+        // world while the player is offline, so these maps must survive the session gap.
+        // When the player reconnects, refreshPrivateHighlights / cleanupStaleOwnedDropIds will
+        // prune any IDs whose items have despawned since then.  onServerStopped clears all
+        // maps when the world is unloaded, so there is no long-term leak.
         GLOW_TEAMS_INITIALIZED.remove(uuid);
     }
 
@@ -1227,7 +1233,7 @@ public class DeathEventHandler {
         RECOVERY_TARGET_CACHE.clear();
         ENTITY_DIMENSIONS.clear();
         recoverySearchBudgetTick = Long.MIN_VALUE;
-        expensiveRecoverySearchesThisTick = 0;
+        expensiveRecoverySearchesThisTick.set(0);
     }
 
     private static void captureDeathDropSnapshot(ServerPlayer player,

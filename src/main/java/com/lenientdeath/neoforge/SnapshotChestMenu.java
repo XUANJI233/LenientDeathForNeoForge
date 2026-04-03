@@ -3,6 +3,7 @@ package com.lenientdeath.neoforge;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.SimpleMenuProvider;
@@ -399,6 +400,15 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
             Runnable action = actions.get(slotId);
             if (action != null && clickType == ClickType.PICKUP) {
                 action.run();
+            } else {
+                // No action is bound to this slot (or wrong click type).  If the player has an
+                // item on the cursor and clicks here, the client will optimistically move it into
+                // the slot.  The server must resync the cursor so the client reverts the phantom
+                // placement and does not end up with a "ghost item" (duplicated/disappeared item).
+                if (player instanceof ServerPlayer sp) {
+                    sp.connection.send(new ClientboundContainerSetSlotPacket(
+                            -1, this.incrementStateId(), player.containerMenu.getCarried()));
+                }
             }
             return;
         }

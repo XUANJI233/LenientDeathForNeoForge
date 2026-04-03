@@ -121,6 +121,12 @@ public class DeathEventHandler {
     private static final int ENTITY_SHARED_FLAGS_DATA_ID = 0;
     /** Entity shared flags 中发光位的掩码。 */
     private static final byte GLOWING_FLAG_MASK = 0x40;
+    /**
+     * isValidRecoverySpot 内部复用的临时可变位置（仅服务端主线程调用，无并发风险）。
+     * 避免每次安全点检查都分配新的 BlockPos 对象，消除 GC 压力。
+     */
+    private static final BlockPos.MutableBlockPos TEMP_FLOOR_POS = new BlockPos.MutableBlockPos();
+    private static final BlockPos.MutableBlockPos TEMP_HEAD_POS = new BlockPos.MutableBlockPos();
 
     // ── 反射获取的访问器 ──────────────────────────────────────────
 
@@ -279,6 +285,9 @@ public class DeathEventHandler {
             }
         } else if (player.tickCount % privateHighlightIntervalTicks == 0) {
             clearPrivateHighlights(player);
+            // 高亮功能关闭时 refreshPrivateHighlights 不会被调用，需要手动清理已消失的掉落物 ID
+            // 避免玩家多次死亡后 OWNED_DEATH_DROP_IDS 无限膨胀
+            cleanupStaleOwnedDropIds(player);
         }
 
         // 只有玩家站在地面上，且不是观察者模式时，才记录安全点历史
@@ -851,8 +860,8 @@ public class DeathEventHandler {
      * @param feetPos 物品将被放置的位置（地板上方的空气方块）
      */
     private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
-        BlockPos floorPos = feetPos.below();
-        BlockPos headPos = feetPos.above();
+        BlockPos floorPos = TEMP_FLOOR_POS.set(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
+        BlockPos headPos = TEMP_HEAD_POS.set(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
 
         var floor = level.getBlockState(floorPos);
         var feet = level.getBlockState(feetPos);
@@ -1530,6 +1539,36 @@ public class DeathEventHandler {
         if (tracked.isEmpty()) {
             OWNED_DEATH_DROP_IDS.remove(owner);
             OWNER_SCOREBOARD_NAMES.remove(owner);
+        }
+    }
+
+    /**
+     * 清理指定玩家的已失效掉落物实体 ID（高亮功能关闭时的内存泄漏防护）。
+     * <p>
+     * 当 ITEM_GLOW_ENABLED 为 false 时，{@link #refreshPrivateHighlights} 不会被调用，
+     * 因此无法依赖其扫描逻辑清除已消失实体的 ID。此方法填补这一清理路径的缺失，
+     * 防止玩家多次死亡后 OWNED_DEATH_DROP_IDS 无限膨胀。
+     */
+    private static void cleanupStaleOwnedDropIds(ServerPlayer player) {
+        if (!(player.level() instanceof ServerLevel serverLevel)) return;
+        UUID playerId = player.getUUID();
+        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        if (trackedEntityIds == null || trackedEntityIds.isEmpty()) return;
+
+        List<Integer> stale = new ArrayList<>();
+        for (Integer entityId : trackedEntityIds) {
+            Entity maybeEntity = serverLevel.getEntity(entityId);
+            if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive()
+                    || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+                stale.add(entityId);
+            }
+        }
+        if (!stale.isEmpty()) {
+            trackedEntityIds.removeAll(stale);
+            if (trackedEntityIds.isEmpty()) {
+                OWNED_DEATH_DROP_IDS.remove(playerId);
+                OWNER_SCOREBOARD_NAMES.remove(playerId);
+            }
         }
     }
 

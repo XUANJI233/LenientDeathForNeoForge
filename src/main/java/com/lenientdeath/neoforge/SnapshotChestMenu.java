@@ -403,7 +403,8 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
             return;
         }
 
-        // 底部玩家背包区域也禁用，避免 UI 菜单被当作物品操作界面
+        // 底部玩家背包区域：转交父类正常处理，保持客户端与服务端状态同步，避免幽灵物品
+        super.clicked(slotId, button, clickType, player);
     }
 
     @Override

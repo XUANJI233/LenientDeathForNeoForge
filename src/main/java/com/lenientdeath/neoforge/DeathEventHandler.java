@@ -278,6 +278,7 @@ public class DeathEventHandler {
                 refreshPrivateHighlights(player);
             }
         } else if (player.tickCount % privateHighlightIntervalTicks == 0) {
+            pruneOwnedDropTracking(player);
             clearPrivateHighlights(player);
         }
 
@@ -731,7 +732,10 @@ public class DeathEventHandler {
      * @return 验证后的可用位置，均不可用则返回 null
      */
     private static BlockPos validatePreferredSafePos(ServerLevel level, ItemEntity item, BlockPos preferredPos) {
-        if (isValidRecoverySpot(level, item, preferredPos)) {
+        BlockPos.MutableBlockPos floorPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos headPos = new BlockPos.MutableBlockPos();
+
+        if (isValidRecoverySpot(level, item, preferredPos, floorPos, headPos)) {
             return preferredPos;
         }
 
@@ -740,7 +744,7 @@ public class DeathEventHandler {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     BlockPos candidate = preferredPos.offset(dx, 0, dz);
-                    if (isValidRecoverySpot(level, item, candidate)) {
+                    if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
                         return candidate;
                     }
                 }
@@ -771,6 +775,8 @@ public class DeathEventHandler {
 
         // 使用 MutableBlockPos 避免在多重循环中大量创建 BlockPos 对象
         BlockPos.MutableBlockPos candidate = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos floorPos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos headPos = new BlockPos.MutableBlockPos();
 
         // 由中心向外扩展搜索，每次只检查半径为 r 的外环
         for (int r = 0; r <= horizontalRadius; r++) {
@@ -807,7 +813,7 @@ public class DeathEventHandler {
                                 return best;
                             }
                             candidate.set(center.getX() + dx, yUp, center.getZ() + dz);
-                            if (isValidRecoverySpot(level, item, candidate)) {
+                            if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
                                 double distanceSq = candidate.distSqr(center);
                                 if (distanceSq < bestDistanceSq) {
                                     bestDistanceSq = distanceSq;
@@ -827,7 +833,7 @@ public class DeathEventHandler {
                                 return best;
                             }
                             candidate.set(center.getX() + dx, yDown, center.getZ() + dz);
-                            if (isValidRecoverySpot(level, item, candidate)) {
+                            if (isValidRecoverySpot(level, item, candidate, floorPos, headPos)) {
                                 double distanceSq = candidate.distSqr(center);
                                 if (distanceSq < bestDistanceSq) {
                                     bestDistanceSq = distanceSq;
@@ -850,9 +856,9 @@ public class DeathEventHandler {
      *
      * @param feetPos 物品将被放置的位置（地板上方的空气方块）
      */
-    private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos) {
-        BlockPos floorPos = feetPos.below();
-        BlockPos headPos = feetPos.above();
+    private static boolean isValidRecoverySpot(ServerLevel level, ItemEntity item, BlockPos feetPos, BlockPos.MutableBlockPos floorPos, BlockPos.MutableBlockPos headPos) {
+        floorPos.set(feetPos.getX(), feetPos.getY() - 1, feetPos.getZ());
+        headPos.set(feetPos.getX(), feetPos.getY() + 1, feetPos.getZ());
 
         var floor = level.getBlockState(floorPos);
         var feet = level.getBlockState(feetPos);
@@ -1512,6 +1518,37 @@ public class DeathEventHandler {
             if (maybeEntity != null && maybeEntity.isAlive()) {
                 sendPrivateGlowPacket(player, maybeEntity, false);
                 removeGlowColorPacket(player, maybeEntity, entry.getValue());
+            }
+        }
+    }
+
+    /**
+     * 在高亮功能关闭时，按现有追踪索引主动清理已失效的掉落实体 ID。
+     */
+    private static void pruneOwnedDropTracking(ServerPlayer player) {
+        if (!(player.level() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        UUID playerId = player.getUUID();
+        Set<Integer> trackedEntityIds = OWNED_DEATH_DROP_IDS.get(playerId);
+        if (trackedEntityIds == null || trackedEntityIds.isEmpty()) {
+            return;
+        }
+
+        List<Integer> staleTrackedIds = new ArrayList<>();
+        for (Integer entityId : trackedEntityIds) {
+            Entity maybeEntity = serverLevel.getEntity(entityId);
+            if (!(maybeEntity instanceof ItemEntity item) || !item.isAlive() || !ModEntityData.has(item, ModAttachments.OWNER_UUID)) {
+                staleTrackedIds.add(entityId);
+            }
+        }
+
+        if (!staleTrackedIds.isEmpty()) {
+            trackedEntityIds.removeAll(staleTrackedIds);
+            if (trackedEntityIds.isEmpty()) {
+                OWNED_DEATH_DROP_IDS.remove(playerId);
+                OWNER_SCOREBOARD_NAMES.remove(playerId);
             }
         }
     }

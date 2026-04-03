@@ -20,6 +20,7 @@ public class NbtChecker {
         var tag = stack.get(DataComponents.CUSTOM_DATA);
         if (tag == null) return null;
 
-        return tag.copyTag().getBoolean(config.NBT_KEY.get());
+        var rawTag = tag.getUnsafe();
+        return rawTag != null && rawTag.getBoolean(config.NBT_KEY.get());
     }
 }

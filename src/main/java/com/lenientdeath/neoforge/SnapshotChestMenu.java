@@ -407,7 +407,7 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
                 // placement and does not end up with a "ghost item" (duplicated/disappeared item).
                 if (player instanceof ServerPlayer sp) {
                     sp.connection.send(new ClientboundContainerSetSlotPacket(
-                            -1, this.incrementStateId(), player.containerMenu.getCarried()));
+                            -1, this.incrementStateId(), -1, player.containerMenu.getCarried()));
                 }
             }
             return;

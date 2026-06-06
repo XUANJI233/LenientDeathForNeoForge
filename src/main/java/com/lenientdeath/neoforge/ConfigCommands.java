@@ -334,6 +334,7 @@ public final class ConfigCommands {
     private static int saveConfig(CommandSourceStack source) {
         try {
             Config.SPEC.save();
+            applyRuntimeConfigChanges();
             return 1;
         } catch (Exception ex) {
             LOGGER.error("Failed to save config", ex);
@@ -431,7 +432,7 @@ public final class ConfigCommands {
             applyBoolean(fileConfig, "Features.restoreSlots", Config.COMMON.RESTORE_SLOTS_ENABLED);
             applyInt(fileConfig, "Features.deathDropSnapshotMaxPerPlayer", Config.COMMON.DEATH_DROP_SNAPSHOT_MAX_PER_PLAYER);
 
-            ManualAllowAndBlocklist.INSTANCE.refreshItems();
+            applyRuntimeConfigChanges();
 
             Config.SPEC.save();
             return true;
@@ -439,6 +440,11 @@ public final class ConfigCommands {
             LOGGER.error("Failed to reload config from file {}", configPath, ex);
             return false;
         }
+    }
+
+    private static void applyRuntimeConfigChanges() {
+        ManualAllowAndBlocklist.INSTANCE.refreshItems();
+        DeathEventHandler.onConfigLoaded();
     }
 
     private static void applyBoolean(CommentedFileConfig fileConfig, String path, ModConfigSpec.BooleanValue target) {
@@ -695,6 +701,7 @@ public final class ConfigCommands {
     }
 
     private static int openSnapshotUiRoot(CommandSourceStack source) {
+        DeathEventHandler.rememberServer(source.getServer());
         if (!(source.getEntity() instanceof ServerPlayer viewer)) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
             return 0;
@@ -704,6 +711,7 @@ public final class ConfigCommands {
     }
 
     private static int openSnapshotUiPlayer(CommandSourceStack source, String playerName) {
+        DeathEventHandler.rememberServer(source.getServer());
         if (!(source.getEntity() instanceof ServerPlayer viewer)) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
             return 0;
@@ -713,6 +721,7 @@ public final class ConfigCommands {
     }
 
     private static int openSnapshotUiSnapshot(CommandSourceStack source, String playerName, int snapshotId, int page) {
+        DeathEventHandler.rememberServer(source.getServer());
         if (!(source.getEntity() instanceof ServerPlayer viewer)) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.gui.player_only"));
             return 0;
@@ -722,6 +731,7 @@ public final class ConfigCommands {
     }
 
     private static int requestRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        DeathEventHandler.rememberServer(source.getServer());
         UUID playerId = findSnapshotPlayerIdByName(playerName);
         if (playerId == null) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
@@ -749,6 +759,7 @@ public final class ConfigCommands {
     }
 
     private static int confirmRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        DeathEventHandler.rememberServer(source.getServer());
         UUID playerId = findSnapshotPlayerIdByName(playerName);
         if (playerId == null) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
@@ -770,6 +781,7 @@ public final class ConfigCommands {
     }
 
     private static int planRestoreDeathDropSnapshot(CommandSourceStack source, String playerName, int snapshotId) {
+        DeathEventHandler.rememberServer(source.getServer());
         UUID playerId = findSnapshotPlayerIdByName(playerName);
         if (playerId == null) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
@@ -787,6 +799,7 @@ public final class ConfigCommands {
     }
 
     private static int requestRestoreLatestDeathDropSnapshot(CommandSourceStack source, String playerName) {
+        DeathEventHandler.rememberServer(source.getServer());
         UUID playerId = findSnapshotPlayerIdByName(playerName);
         if (playerId == null) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));
@@ -804,6 +817,7 @@ public final class ConfigCommands {
     }
 
     private static int clearDeathDropSnapshots(CommandSourceStack source, String playerName) {
+        DeathEventHandler.rememberServer(source.getServer());
         UUID playerId = findSnapshotPlayerIdByName(playerName);
         if (playerId == null) {
             source.sendFailure(Component.translatable("lenientdeath.command.snapshot.player_not_found", playerName));

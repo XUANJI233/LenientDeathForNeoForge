@@ -241,9 +241,9 @@ Items are evaluated on death in the following priority order:
 
 - **Void Recovery** (`voidRecovery`): When dropped items fall below the world's minimum height, they are teleported to a safe position.
 - **Hazard Recovery** (`hazardRecovery`): When dropped items are on fire or in lava, they are teleported to a safe position.
-- Safe position selection order: player historical safe point -> nearest valid 3D landing spot -> near world spawn.
+- Safe position selection order: player historical safe point -> death-recorded safe point -> nearest valid local 3D landing spot for hazards -> context fallback. It does not fall back to world spawn.
 - `voidRecoveryMode` controls scope: `DEATH_DROPS_ONLY` (default, death drops only) or `ALL_DROPS` (all drops).
-- Rate limiting: `voidRecoveryWindowTicks`, `voidRecoveryMaxRecoveries`, and `voidRecoveryCooldownTicks` prevent excessive recoveries in a short period.
+- Void rate limiting: `voidRecoveryWindowTicks`, `voidRecoveryMaxRecoveries`, and `voidRecoveryCooldownTicks` prevent excessive void recoveries in a short period. Fire/lava recovery is not blocked by this limiter so items are not left to burn during cooldown.
 
 ### Other Features
 

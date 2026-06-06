@@ -61,7 +61,17 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
         this.session = session;
 
         for (int i = 0; i < CHEST_SIZE; i++) {
-            addSlot(new Slot(chest, i, 8 + (i % 9) * 18, 18 + (i / 9) * 18));
+            addSlot(new Slot(chest, i, 8 + (i % 9) * 18, 18 + (i / 9) * 18) {
+                @Override
+                public boolean mayPickup(Player player) {
+                    return false;
+                }
+
+                @Override
+                public boolean mayPlace(ItemStack stack) {
+                    return false;
+                }
+            });
         }
 
         for (int row = 0; row < 3; ++row) {
@@ -395,16 +405,13 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
 
     @Override
     public void clicked(int slotId, int button, ClickType clickType, Player player) {
-        // 顶部 6x9 仅作 UI 按钮和展示，禁止拿取；点击按钮触发页面动作
+        // 顶部 6x9 仅作 UI 按钮和展示，禁止拿取；点击按钮触发页面动作。
+        // 无动作或错误点击类型时同步游标，防止客户端临时放入展示槽后出现幽灵物品。
         if (slotId >= 0 && slotId < CHEST_SIZE) {
-            Runnable action = actions.get(slotId);
-            if (action != null && clickType == ClickType.PICKUP) {
+            Runnable action = clickType == ClickType.PICKUP ? actions.get(slotId) : null;
+            if (action != null) {
                 action.run();
             } else {
-                // No action is bound to this slot (or wrong click type).  If the player has an
-                // item on the cursor and clicks here, the client will optimistically move it into
-                // the slot.  The server must resync the cursor so the client reverts the phantom
-                // placement and does not end up with a "ghost item" (duplicated/disappeared item).
                 if (player instanceof ServerPlayer sp) {
                     sp.connection.send(new ClientboundContainerSetSlotPacket(
                             -1, this.incrementStateId(), -1, player.containerMenu.getCarried()));
@@ -413,7 +420,7 @@ public class SnapshotChestMenu extends AbstractContainerMenu {
             return;
         }
 
-        // 底部玩家背包区域：转交父类正常处理，保持客户端与服务端状态同步，避免幽灵物品
+        // 底部玩家背包区域：转交父类正常处理，保持客户端与服务端状态同步。
         super.clicked(slotId, button, clickType, player);
     }
 

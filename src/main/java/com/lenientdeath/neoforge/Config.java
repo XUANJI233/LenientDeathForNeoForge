@@ -235,7 +235,7 @@ public class Config {
             VOID_RECOVERY_ENABLED = builder.comment(
                     "Recover items that fall into the void to a safe position\n"
                     + "启用虚空恢复：当掉落物落入虚空时传送到安全位置\n"
-                    + "优先使用玩家历史安全点 → 三维搜索最近安全落点 → 出生点附近").define("voidRecovery", true);
+                    + "优先使用玩家历史安全点 → 死亡记录安全点 → 上下文兜底坐标（不使用出生点）").define("voidRecovery", true);
             HAZARD_RECOVERY_ENABLED = builder.comment(
                     "Recover items from lava/fire to a safe position\n"
                     + "启用火焰/岩浆恢复：当掉落物着火或在岩浆中时传送到安全位置").define("hazardRecovery", true);

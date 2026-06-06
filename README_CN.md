@@ -241,9 +241,9 @@ curios = "PRESERVE"
 
 - **虚空恢复**（`voidRecovery`）：掉落物低于世界最低高度时自动传送到安全位置。
 - **火焰/岩浆恢复**（`hazardRecovery`）：掉落物着火或在岩浆中时自动传送到安全位置。
-- 安全位置选取顺序：玩家历史安全点 -> 三维距离最近的有效落点 -> 出生点附近。
+- 安全位置选取顺序：玩家历史安全点 -> 死亡记录安全点 -> 火焰/岩浆恢复时搜索附近最近有效落点 -> 上下文兜底坐标；不会回退到世界出生点。
 - `voidRecoveryMode` 控制作用范围：`DEATH_DROPS_ONLY`（默认，仅死亡掉落）或 `ALL_DROPS`（所有掉落物）。
-- 恢复限流：通过 `voidRecoveryWindowTicks`、`voidRecoveryMaxRecoveries`、`voidRecoveryCooldownTicks` 三个参数防止短时间内反复恢复。
+- 虚空恢复限流：通过 `voidRecoveryWindowTicks`、`voidRecoveryMaxRecoveries`、`voidRecoveryCooldownTicks` 三个参数防止短时间内反复虚空恢复。火焰/岩浆恢复不会被该限流阻断，避免物品在冷却窗口里被烧毁。
 
 ### 其他功能
 
